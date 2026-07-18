@@ -209,6 +209,10 @@ export async function refreshMarketSnapshot(
 
   try {
     const marketDate = chinaMarketDate(now);
+    const lastReadyDate =
+      now.toISOString() >= marketDataReadyTimestamp(marketDate)
+        ? marketDate
+        : addDays(marketDate, -1);
     const calendarEnd = addDays(marketDate, 45);
     const [stockDirectory, tradingCalendar] = await Promise.all([
       options.source.loadStockDirectory(),
@@ -218,12 +222,13 @@ export async function refreshMarketSnapshot(
       left.date.localeCompare(right.date),
     );
     const asOf = normalizedCalendar
-      .filter((day) => day.isOpen && day.date <= marketDate)
+      .filter((day) => day.isOpen && day.date <= lastReadyDate)
       .at(-1)?.date;
-    const nextTradingDate = normalizedCalendar.find(
-      (day) => day.isOpen && day.date > marketDate,
-    )?.date;
-    if (asOf === undefined || nextTradingDate === undefined) {
+    if (asOf === undefined) {
+      throw unavailable('CALENDAR_INCOMPLETE');
+    }
+    const nextTradingDate = normalizedCalendar.find((day) => day.isOpen && day.date > asOf)?.date;
+    if (nextTradingDate === undefined) {
       throw unavailable('CALENDAR_INCOMPLETE');
     }
 
@@ -315,6 +320,10 @@ function addDays(value: IsoDate, days: number): IsoDate {
 
 function marketCloseTimestamp(date: IsoDate): string {
   return `${date}T07:00:00.000Z`;
+}
+
+function marketDataReadyTimestamp(date: IsoDate): string {
+  return `${date}T08:30:00.000Z`;
 }
 
 function compactDate(value: IsoDate): string {

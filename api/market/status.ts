@@ -10,13 +10,11 @@ interface MarketStatusHandlerDependencies extends HttpRouteDependencies {
   now?: (() => Date) | undefined;
 }
 
-const MARKET_STATUS_CACHE = 'public, max-age=0, s-maxage=60, stale-while-revalidate=300';
-
 export function createMarketStatusHandler(dependencies: MarketStatusHandlerDependencies = {}) {
   const store = dependencies.store ?? createBlobSnapshotStore();
 
   return createHttpHandler({
-    cacheControl: MARKET_STATUS_CACHE,
+    cacheControl: 'no-store',
     rateLimiter: dependencies.rateLimiter,
     logger: dependencies.logger,
     allowedOrigins: dependencies.allowedOrigins,

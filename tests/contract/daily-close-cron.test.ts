@@ -215,6 +215,7 @@ describe('market status route', () => {
     })(new Request('https://stocks.example.com/api/market/status'));
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
     await expect(response.json()).resolves.toMatchObject({
       data: {
         asOf: '2026-07-17',

@@ -26,8 +26,10 @@ import {
 } from '../../src/server/blob-snapshot-store';
 
 const FRIDAY = isoDate('2026-07-17');
+const THURSDAY = isoDate('2026-07-16');
 const MONDAY = isoDate('2026-07-20');
 const MOUTAI = stockCode('600519.SH');
+const PING_AN = stockCode('000001.SZ');
 
 const STOCK_DIRECTORY: readonly StockSearchResult[] = [
   { code: MOUTAI, name: '贵州茅台', pinyinAbbreviation: 'GZMT' },
@@ -108,6 +110,59 @@ describe('daily-close market snapshot cache', () => {
       ...expectedSnapshot(),
     });
     await expect(store.read<DailyMarketSnapshot>(MARKET_SNAPSHOT_KEY)).resolves.toEqual(snapshot);
+  });
+
+  it('publishes the prior open day before 16:30 Shanghai and the current day at readiness', async () => {
+    const directory: readonly StockSearchResult[] = [
+      { code: PING_AN, name: '平安银行', pinyinAbbreviation: 'PAYH' },
+      ...STOCK_DIRECTORY,
+    ];
+    const calendar: readonly TradingCalendarDay[] = [
+      { date: THURSDAY, isOpen: true },
+      ...TRADING_CALENDAR,
+    ];
+    const priorClose: readonly DailyPrice[] = [
+      { ...DAILY_CLOSE[0]!, code: PING_AN, date: THURSDAY },
+      { ...DAILY_CLOSE[0]!, date: THURSDAY },
+    ];
+    const loadDailyClose = vi.fn(async ({ date }: { date: typeof FRIDAY }) =>
+      date === FRIDAY ? DAILY_CLOSE : priorClose,
+    );
+    const marketSource = source({
+      loadStockDirectory: vi.fn(async () => directory),
+      loadTradingCalendar: vi.fn(async () => calendar),
+      loadDailyClose,
+    });
+    const store = new MemorySnapshotStore();
+
+    const beforeReady = await refreshMarketSnapshot({
+      store,
+      source: marketSource,
+      now: () => new Date('2026-07-17T07:30:00.000Z'),
+    });
+    const beforeReadyStatus = await readMarketSnapshot({
+      store,
+      now: () => new Date('2026-07-17T07:30:00.000Z'),
+    });
+    const atReady = await refreshMarketSnapshot({
+      store,
+      source: marketSource,
+      now: () => new Date('2026-07-17T08:30:00.000Z'),
+    });
+
+    expect(loadDailyClose.mock.calls).toEqual([[{ date: THURSDAY }], [{ date: FRIDAY }]]);
+    expect(beforeReady).toMatchObject({
+      asOf: THURSDAY,
+      nextExpectedCloseAt: '2026-07-17T07:00:00.000Z',
+      dailyClose: priorClose,
+    });
+    expect(beforeReady.dailyClose).not.toContainEqual(expect.objectContaining({ date: FRIDAY }));
+    expect(beforeReadyStatus.freshness).toBe('stale');
+    expect(atReady).toMatchObject({
+      asOf: FRIDAY,
+      nextExpectedCloseAt: '2026-07-20T07:00:00.000Z',
+      dailyClose: DAILY_CLOSE,
+    });
   });
 
   it('records a safe failure while leaving the prior snapshot intact', async () => {
@@ -211,7 +266,7 @@ describe('private Vercel Blob snapshot store', () => {
     expect(snapshotOptions).toEqual({
       access: 'private',
       addRandomSuffix: false,
-      allowOverwrite: false,
+      allowOverwrite: true,
       cacheControlMaxAge: 31_536_000,
       contentType: 'application/json',
     });
@@ -231,6 +286,44 @@ describe('private Vercel Blob snapshot store', () => {
       access: 'private',
       useCache: false,
     });
+  });
+
+  it('idempotently writes the same content hash twice while preserving pointer CAS', async () => {
+    const contentPaths = new Set<string>();
+    let pointer: { body: string; etag: string } | null = null;
+    let etagVersion = 0;
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async (pathname) => (pathname.endsWith('/current.json') ? pointer : null)),
+      put: vi.fn(async (pathname, body, options) => {
+        if (!pathname.endsWith('/current.json')) {
+          if (contentPaths.has(pathname) && !options.allowOverwrite) {
+            throw new Error('content pathname already exists');
+          }
+          contentPaths.add(pathname);
+          return;
+        }
+
+        if (pointer === null) {
+          expect(options.allowOverwrite).toBe(false);
+        } else {
+          expect(options).toMatchObject({ allowOverwrite: true, ifMatch: pointer.etag });
+        }
+        etagVersion += 1;
+        pointer = { body, etag: `etag-${etagVersion}` };
+      }),
+    };
+    const store = createBlobSnapshotStore({ client });
+
+    await store.writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot());
+    await store.writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot());
+
+    const snapshotCalls = vi
+      .mocked(client.put)
+      .mock.calls.filter(([pathname]) => !pathname.endsWith('/current.json'));
+    expect(snapshotCalls).toHaveLength(2);
+    expect(snapshotCalls[0]?.[0]).toBe(snapshotCalls[1]?.[0]);
+    expect(snapshotCalls.map(([, , options]) => options.allowOverwrite)).toEqual([true, true]);
+    expect(pointer).toMatchObject({ etag: 'etag-2' });
   });
 
   it('reads the strongly-current pointer before the immutable snapshot object', async () => {
@@ -254,42 +347,173 @@ describe('private Vercel Blob snapshot store', () => {
     ]);
   });
 
-  it.each([
-    ['an existing pointer', { body: '{"snapshotPath":"old.json"}', etag: 'etag-current' }],
-    ['the first pointer', null],
-  ])(
-    'classifies a concurrent write against %s without silently overwriting it',
-    async (_, pointer) => {
-      const client: SnapshotBlobClient = {
-        get: vi.fn(async () => pointer),
-        put: vi.fn(async (pathname) => {
-          if (pathname.endsWith('/current.json')) {
-            throw new BlobPreconditionFailedError();
-          }
-        }),
-      };
+  it('accepts an initial competing creator when its pointer chose the same content path', async () => {
+    let attemptedPath = '';
+    let pointerReads = 0;
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async (pathname) => {
+        if (!pathname.endsWith('/current.json')) {
+          return null;
+        }
+        pointerReads += 1;
+        return pointerReads === 1
+          ? null
+          : {
+              body: JSON.stringify({ snapshotPath: attemptedPath }),
+              etag: 'etag-winner',
+            };
+      }),
+      put: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          throw new Error('pathname already exists');
+        }
+        attemptedPath = pathname;
+      }),
+    };
 
-      await expect(
-        createBlobSnapshotStore({ client }).writeAtomically(
-          MARKET_SNAPSHOT_KEY,
-          expectedSnapshot(),
-        ),
-      ).rejects.toMatchObject({
-        name: 'SnapshotConflictError',
-        code: 'INTERNAL_ERROR',
-        status: 409,
-        retryable: true,
-      });
+    await expect(
+      createBlobSnapshotStore({ client }).writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot()),
+    ).resolves.toBeUndefined();
+    expect(client.get).toHaveBeenLastCalledWith('market-snapshots/current.json', {
+      access: 'private',
+      useCache: false,
+    });
+  });
 
-      const pointerCall = vi.mocked(client.put).mock.calls.at(-1);
-      expect(pointerCall?.[0]).toBe('market-snapshots/current.json');
-      expect(pointerCall?.[2]).toMatchObject(
-        pointer === null
-          ? { allowOverwrite: false }
-          : { allowOverwrite: true, ifMatch: 'etag-current' },
-      );
-    },
-  );
+  it('classifies an initial competing creator with a different winner and preserves last-good', async () => {
+    const storageError = new Error('pathname already exists');
+    const winnerPath = 'market-snapshots/snapshots/2026-07-16/winner.json';
+    const lastGood = { marker: 'last-good' };
+    let pointerReads = 0;
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          pointerReads += 1;
+          return pointerReads === 1
+            ? null
+            : {
+                body: JSON.stringify({ snapshotPath: winnerPath }),
+                etag: 'etag-winner',
+              };
+        }
+        return pathname === winnerPath
+          ? { body: JSON.stringify(lastGood), etag: 'etag-snapshot' }
+          : null;
+      }),
+      put: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          throw storageError;
+        }
+      }),
+    };
+    const store = createBlobSnapshotStore({ client });
+
+    await expect(
+      store.writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot()),
+    ).rejects.toMatchObject({
+      name: 'SnapshotConflictError',
+      code: 'INTERNAL_ERROR',
+      status: 409,
+      retryable: true,
+    });
+    await expect(store.read(MARKET_SNAPSHOT_KEY)).resolves.toEqual(lastGood);
+  });
+
+  it('preserves the initial storage error when a failed pointer create has no winner', async () => {
+    const storageError = new Error('blob service unavailable');
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async () => null),
+      put: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          throw storageError;
+        }
+      }),
+    };
+
+    await expect(
+      createBlobSnapshotStore({ client }).writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot()),
+    ).rejects.toBe(storageError);
+    expect(client.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts an existing-pointer CAS race when the winner chose the same content path', async () => {
+    let attemptedPath = '';
+    let pointerReads = 0;
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async () => {
+        pointerReads += 1;
+        return pointerReads === 1
+          ? {
+              body: JSON.stringify({
+                snapshotPath: 'market-snapshots/snapshots/2026-07-16/old.json',
+              }),
+              etag: 'etag-current',
+            }
+          : {
+              body: JSON.stringify({ snapshotPath: attemptedPath }),
+              etag: 'etag-winner',
+            };
+      }),
+      put: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          throw new BlobPreconditionFailedError();
+        }
+        attemptedPath = pathname;
+      }),
+    };
+
+    await expect(
+      createBlobSnapshotStore({ client }).writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot()),
+    ).resolves.toBeUndefined();
+  });
+
+  it('classifies an existing-pointer CAS winner at a different path as a conflict', async () => {
+    const pointer = {
+      body: JSON.stringify({
+        snapshotPath: 'market-snapshots/snapshots/2026-07-16/winner.json',
+      }),
+      etag: 'etag-current',
+    };
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async () => pointer),
+      put: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          throw new BlobPreconditionFailedError();
+        }
+      }),
+    };
+
+    await expect(
+      createBlobSnapshotStore({ client }).writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot()),
+    ).rejects.toMatchObject({
+      name: 'SnapshotConflictError',
+      code: 'INTERNAL_ERROR',
+      status: 409,
+      retryable: true,
+    });
+  });
+
+  it('preserves an ordinary existing-pointer storage failure when the old pointer is unchanged', async () => {
+    const storageError = new Error('blob service unavailable');
+    const pointer = {
+      body: JSON.stringify({
+        snapshotPath: 'market-snapshots/snapshots/2026-07-16/last-good.json',
+      }),
+      etag: 'etag-current',
+    };
+    const client: SnapshotBlobClient = {
+      get: vi.fn(async () => pointer),
+      put: vi.fn(async (pathname) => {
+        if (pathname.endsWith('/current.json')) {
+          throw storageError;
+        }
+      }),
+    };
+
+    await expect(
+      createBlobSnapshotStore({ client }).writeAtomically(MARKET_SNAPSHOT_KEY, expectedSnapshot()),
+    ).rejects.toBe(storageError);
+  });
 
   it('records safe failures as immutable objects without reading or touching the pointer', async () => {
     const client: SnapshotBlobClient = {
@@ -312,7 +536,7 @@ describe('private Vercel Blob snapshot store', () => {
     expect(JSON.parse(String(body))).toEqual(failure);
     expect(options).toMatchObject({
       access: 'private',
-      allowOverwrite: false,
+      allowOverwrite: true,
       addRandomSuffix: false,
     });
     expect(JSON.stringify(options)).not.toContain('token');

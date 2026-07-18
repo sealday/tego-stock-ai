@@ -115,7 +115,23 @@ export function createBlobSnapshotStore(options: BlobSnapshotStoreOptions = {}):
           pointer === null ? pointerPutOptions() : pointerPutOptions({ ifMatch: pointer.etag }),
         );
       } catch (error) {
-        if (error instanceof BlobPreconditionFailedError) {
+        let winner: SnapshotBlobObject | null;
+        try {
+          winner = await client.get(pointerPath(key), {
+            access: 'private',
+            useCache: false,
+          });
+        } catch {
+          throw error;
+        }
+        if (winner === null) {
+          throw error;
+        }
+        const winnerPath = parsePointer(winner.body, key).snapshotPath;
+        if (winnerPath === snapshotPath) {
+          return;
+        }
+        if (pointer === null || error instanceof BlobPreconditionFailedError) {
           throw new SnapshotConflictError(error);
         }
         throw error;
@@ -186,7 +202,7 @@ function immutablePutOptions(): BlobPutOptions {
   return {
     access: 'private',
     addRandomSuffix: false,
-    allowOverwrite: false,
+    allowOverwrite: true,
     cacheControlMaxAge: IMMUTABLE_CACHE_SECONDS,
     contentType: 'application/json',
   };
