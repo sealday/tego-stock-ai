@@ -19,6 +19,7 @@ interface PackageLock {
 const approvedDependencies = {
   react: '19.2.7',
   'react-dom': '19.2.7',
+  zod: '4.4.3',
 };
 
 const approvedDevDependencies = {
@@ -31,6 +32,7 @@ const approvedDevDependencies = {
   '@types/node': '24.13.3',
   '@types/react': '19.2.17',
   '@types/react-dom': '19.2.3',
+  '@vercel/node': '5.8.26',
   '@vitejs/plugin-react': '6.0.3',
   '@vitest/coverage-v8': '4.1.10',
   husky: '9.1.7',

@@ -23,6 +23,9 @@ export default defineConfig({
           name: 'contract',
           environment: 'node',
           include: ['tests/contract/**/*.test.ts'],
+          env: {
+            TUSHARE_TOKEN: '',
+          },
         },
       },
     ],

@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "ts_code": "600519.SH",
+      "ann_date": "20260715",
+      "end_date": "20260630",
+      "roe": 31,
+      "grossprofit_margin": 91,
+      "or_yoy": null,
+      "netprofit_yoy": 16,
+      "ocf_to_opincome": 108,
+      "debt_to_assets": 12,
+      "update_flag": "1"
+    }
+  ]
+}

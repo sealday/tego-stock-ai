@@ -1,0 +1,26 @@
+{
+  "daily": [
+    {
+      "ts_code": "600519.SH",
+      "trade_date": "20260717",
+      "close": 1430.2,
+      "pre_close": 1420,
+      "pct_chg": 0.7183
+    }
+  ],
+  "stocks": [
+    {
+      "ts_code": "600519.SH",
+      "name": "贵州茅台"
+    }
+  ],
+  "valuation": [
+    {
+      "ts_code": "600519.SH",
+      "trade_date": "20260717",
+      "pe_ttm": null,
+      "pb": 8.1,
+      "total_mv": 179600000
+    }
+  ]
+}
