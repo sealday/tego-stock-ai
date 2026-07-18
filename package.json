@@ -17,6 +17,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@vercel/blob": "2.6.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "zod": "4.4.3"

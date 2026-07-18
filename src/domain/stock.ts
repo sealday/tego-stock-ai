@@ -31,6 +31,29 @@ export interface DailyPrice {
   adjustmentFactor: number | null;
 }
 
+export interface TradingCalendarDay {
+  date: IsoDate;
+  isOpen: boolean;
+}
+
+export interface DailyMarketSnapshot {
+  version: 1;
+  asOf: IsoDate;
+  lastSuccessfulAt: string;
+  nextExpectedCloseAt: string;
+  stockDirectory: readonly StockSearchResult[];
+  tradingCalendar: readonly TradingCalendarDay[];
+  dailyClose: readonly DailyPrice[];
+  limitations: readonly string[];
+}
+
+export interface MarketSnapshotStatus {
+  asOf: IsoDate;
+  lastSuccessfulAt: string;
+  nextExpectedCloseAt: string;
+  freshness: MarketEnvelope<unknown>['freshness'];
+}
+
 export interface StockSearchResult {
   code: StockCode;
   name: string;
