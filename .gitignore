@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.vercel/
+.superpowers/
+.env
+.env.*
+!.env.example
+*.local
+.DS_Store
+
