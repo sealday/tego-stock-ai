@@ -23,6 +23,64 @@ if (dailyFixtureRow === undefined) {
   throw new Error('Daily fixture must contain one row');
 }
 
+const FUNDAMENTAL_FIELDS = [
+  'ts_code',
+  'ann_date',
+  'end_date',
+  'roe',
+  'grossprofit_margin',
+  'or_yoy',
+  'netprofit_yoy',
+  'debt_to_assets',
+  'update_flag',
+];
+const INCOME_FIELDS = [
+  'ts_code',
+  'ann_date',
+  'end_date',
+  'report_type',
+  'n_income_attr_p',
+  'update_flag',
+];
+const CASHFLOW_FIELDS = [
+  'ts_code',
+  'ann_date',
+  'end_date',
+  'report_type',
+  'n_cashflow_act',
+  'update_flag',
+];
+
+function createFundamentalStatementClient(options: {
+  incomeItems?: unknown[][];
+  cashflowItems?: unknown[][];
+  permissionDenied?: 'income' | 'cashflow';
+}) {
+  return {
+    query: vi.fn(async (query: TushareQuery) => {
+      if (query.apiName === options.permissionDenied) {
+        throw new AppError('PROVIDER_PERMISSION', 'Market data access is not permitted', {
+          status: 502,
+          retryable: false,
+          providerCode: '2002',
+        });
+      }
+
+      if (query.apiName === 'income') {
+        return { fields: INCOME_FIELDS, items: options.incomeItems ?? [] };
+      }
+      if (query.apiName === 'cashflow') {
+        return { fields: CASHFLOW_FIELDS, items: options.cashflowItems ?? [] };
+      }
+
+      return {
+        fields: FUNDAMENTAL_FIELDS,
+        items: [['600519.SH', '20260715', '20260630', 31, 91, 12, 16, 12, '1']],
+      };
+    }),
+  };
+}
+
 describe('Tushare daily row mapper', () => {
   it('normalizes provider units and field names into the public daily-price shape', () => {
     expect(mapDailyRows(fixture.items)).toEqual([
@@ -334,7 +392,69 @@ describe('Tushare market adapter', () => {
     expect(client.query).toHaveBeenCalledWith(
       expect.objectContaining({
         apiName: 'daily',
-        params: { ts_code: '600519.SH', end_date: '20260718' },
+        params: {
+          ts_code: '600519.SH',
+          start_date: '20260704',
+          end_date: '20260718',
+        },
+      }),
+    );
+    expect(client.query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiName: 'daily_basic',
+        params: { ts_code: '600519.SH', trade_date: '20260717' },
+      }),
+    );
+  });
+
+  it('widens bounded daily windows for a long suspension before resolving valuation', async () => {
+    let dailyCalls = 0;
+    const client = {
+      query: vi.fn(async (query: TushareQuery) => {
+        if (query.apiName === 'daily') {
+          dailyCalls += 1;
+          return {
+            fields: ['ts_code', 'trade_date', 'close', 'pre_close', 'pct_chg'],
+            items: dailyCalls < 3 ? [] : [['600519.SH', '20260116', 1400, 1390, 0.72]],
+          };
+        }
+
+        if (query.apiName === 'stock_basic') {
+          return { fields: ['ts_code', 'name'], items: [['600519.SH', '贵州茅台']] };
+        }
+
+        return {
+          fields: ['ts_code', 'trade_date', 'pe_ttm', 'pb', 'total_mv'],
+          items: [['600519.SH', '20260116', 20, 8, 179_600_000]],
+        };
+      }),
+    };
+    const adapter = createTushareMarketDataAdapter(client);
+
+    const result = await adapter.getOverview({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-18'),
+    });
+
+    expect(result.data).toMatchObject({ date: '2026-01-16', peTtm: 20 });
+    const dailyQueries = client.query.mock.calls
+      .map(([query]) => query)
+      .filter((query) => query.apiName === 'daily');
+    expect(dailyQueries).toEqual([
+      expect.objectContaining({
+        params: { ts_code: '600519.SH', start_date: '20260704', end_date: '20260718' },
+      }),
+      expect.objectContaining({
+        params: { ts_code: '600519.SH', start_date: '20260419', end_date: '20260718' },
+      }),
+      expect.objectContaining({
+        params: { ts_code: '600519.SH', start_date: '20250717', end_date: '20260718' },
+      }),
+    ]);
+    expect(client.query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiName: 'daily_basic',
+        params: { ts_code: '600519.SH', trade_date: '20260116' },
       }),
     );
   });
@@ -406,6 +526,106 @@ describe('Tushare market adapter', () => {
     ).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
   });
 
+  it.each([
+    ['negative price', [-1, 11, 9, 10]],
+    ['zero price', [0, 11, 9, 10]],
+    ['high below low', [10, 8, 9, 9]],
+    ['high below the open', [11, 10, 8, 9]],
+  ] as const)('maps %s OHLC data to a safe provider error', async (_label, prices) => {
+    const [open, high, low, close] = prices;
+    const client = {
+      query: vi.fn(async (query: TushareQuery) =>
+        query.apiName === 'adj_factor'
+          ? {
+              fields: ['ts_code', 'trade_date', 'adj_factor'],
+              items: [['600519.SH', '20260717', 1]],
+            }
+          : {
+              fields: ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              items: [['600519.SH', '20260717', open, high, low, close, 100, 200]],
+            },
+      ),
+    };
+
+    await expect(
+      createTushareMarketDataAdapter(client).getHistory({
+        code: stockCode('600519.SH'),
+        start: isoDate('2026-07-17'),
+        end: isoDate('2026-07-17'),
+        adjust: 'forward',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+      providerCode: 'INVALID_SCHEMA',
+    });
+  });
+
+  it.each([
+    ['daily', '20260715'],
+    ['daily', '20260718'],
+    ['adjustment', '20260715'],
+    ['adjustment', '20260718'],
+  ])('rejects an out-of-range %s provider row dated %s', async (source, providerDate) => {
+    const client = {
+      query: vi.fn(async (query: TushareQuery) => {
+        const date =
+          (source === 'daily' && query.apiName === 'daily') ||
+          (source === 'adjustment' && query.apiName === 'adj_factor')
+            ? providerDate
+            : '20260717';
+
+        return query.apiName === 'adj_factor'
+          ? {
+              fields: ['ts_code', 'trade_date', 'adj_factor'],
+              items: [['600519.SH', date, 1]],
+            }
+          : {
+              fields: ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              items: [['600519.SH', date, 10, 11, 9, 10, 100, 200]],
+            };
+      }),
+    };
+    const adapter = createTushareMarketDataAdapter(client);
+
+    await expect(
+      adapter.getHistory({
+        code: stockCode('600519.SH'),
+        start: isoDate('2026-07-16'),
+        end: isoDate('2026-07-17'),
+        adjust: 'forward',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+      providerCode: 'DATE_RANGE_MISMATCH',
+    });
+  });
+
+  it('rejects an adjustment row for a different stock code', async () => {
+    const client = {
+      query: vi.fn(async (query: TushareQuery) =>
+        query.apiName === 'adj_factor'
+          ? {
+              fields: ['ts_code', 'trade_date', 'adj_factor'],
+              items: [['000001.SZ', '20260717', 1]],
+            }
+          : {
+              fields: ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              items: [['600519.SH', '20260717', 10, 11, 9, 10, 100, 200]],
+            },
+      ),
+    };
+    const adapter = createTushareMarketDataAdapter(client);
+
+    await expect(
+      adapter.getHistory({
+        code: stockCode('600519.SH'),
+        start: isoDate('2026-07-17'),
+        end: isoDate('2026-07-17'),
+        adjust: 'forward',
+      }),
+    ).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', providerCode: 'CODE_MISMATCH' });
+  });
+
   it('selects fundamentals announced on or before the requested cutoff', async () => {
     const client = {
       query: vi.fn(async () => ({
@@ -439,4 +659,165 @@ describe('Tushare market adapter', () => {
       expect.objectContaining({ params: { ts_code: '600519.SH', end_date: '20260717' } }),
     );
   });
+
+  it('prefers the newest reporting period over a later restatement of an older period', async () => {
+    const client = {
+      query: vi.fn(async () => ({
+        fields: [
+          'ts_code',
+          'ann_date',
+          'end_date',
+          'roe',
+          'grossprofit_margin',
+          'or_yoy',
+          'netprofit_yoy',
+          'debt_to_assets',
+          'update_flag',
+        ],
+        items: [
+          ['600519.SH', '20260715', '20260630', 31, 91, 12, 16, 12, '1'],
+          ['600519.SH', '20260716', '20260331', 99, 90, 10, 12, 13, '1'],
+        ],
+      })),
+    };
+    const adapter = createTushareMarketDataAdapter(client);
+
+    const result = await adapter.getFundamentals({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-17'),
+    });
+
+    expect(result.data).toMatchObject({ date: '2026-06-30', roe: 0.31 });
+    expect(result.asOf).toBe('2026-07-15');
+  });
+
+  it('calculates operating cash flow divided by parent-attributable net profit', async () => {
+    const client = createFundamentalStatementClient({
+      incomeItems: [['600519.SH', '20260715', '20260630', '1', 100, '1']],
+      cashflowItems: [['600519.SH', '20260715', '20260630', '1', 120, '1']],
+    });
+    const adapter = createTushareMarketDataAdapter(client);
+
+    const result = await adapter.getFundamentals({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-17'),
+    });
+
+    expect(result.data.operatingCashToNetProfit).toBe(1.2);
+    expect(result.availability.operatingCashToNetProfit).toEqual({
+      status: 'available',
+      value: 1.2,
+    });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiName: 'income',
+        params: { ts_code: '600519.SH', period: '20260630', report_type: '1' },
+        fields: expect.arrayContaining(['n_income_attr_p']),
+      }),
+    );
+    expect(client.query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiName: 'cashflow',
+        params: { ts_code: '600519.SH', period: '20260630', report_type: '1' },
+        fields: expect.arrayContaining(['n_cashflow_act']),
+      }),
+    );
+  });
+
+  it('discloses a zero parent-attributable net profit instead of dividing by zero', async () => {
+    const client = createFundamentalStatementClient({
+      incomeItems: [['600519.SH', '20260715', '20260630', '1', 0, '1']],
+      cashflowItems: [['600519.SH', '20260715', '20260630', '1', 120, '1']],
+    });
+
+    const result = await createTushareMarketDataAdapter(client).getFundamentals({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-17'),
+    });
+
+    expect(result.data.operatingCashToNetProfit).toBeNull();
+    expect(result.availability.operatingCashToNetProfit).toEqual({
+      status: 'missing',
+      reason: 'Parent-attributable net profit is zero',
+    });
+  });
+
+  it('discloses a missing operating cash-flow value', async () => {
+    const client = createFundamentalStatementClient({
+      incomeItems: [['600519.SH', '20260715', '20260630', '1', 100, '1']],
+      cashflowItems: [['600519.SH', '20260715', '20260630', '1', null, '1']],
+    });
+
+    const result = await createTushareMarketDataAdapter(client).getFundamentals({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-17'),
+    });
+
+    expect(result.data.operatingCashToNetProfit).toBeNull();
+    expect(result.availability.operatingCashToNetProfit).toEqual({
+      status: 'missing',
+      reason: 'Operating cash flow is unavailable for the selected period',
+    });
+  });
+
+  it('does not combine statements from a different reporting period', async () => {
+    const client = createFundamentalStatementClient({
+      incomeItems: [['600519.SH', '20260715', '20260331', '1', 100, '1']],
+      cashflowItems: [['600519.SH', '20260715', '20260630', '1', 120, '1']],
+    });
+
+    const result = await createTushareMarketDataAdapter(client).getFundamentals({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-17'),
+    });
+
+    expect(result.data.operatingCashToNetProfit).toBeNull();
+    expect(result.availability.operatingCashToNetProfit).toEqual({
+      status: 'missing',
+      reason: 'Income statement is unavailable for the selected period',
+    });
+  });
+
+  it('uses the latest eligible restatement within the selected reporting period', async () => {
+    const client = createFundamentalStatementClient({
+      incomeItems: [
+        ['600519.SH', '20260715', '20260630', '1', 100, '0'],
+        ['600519.SH', '20260716', '20260630', '1', 200, '1'],
+        ['600519.SH', '20260720', '20260630', '1', 400, '1'],
+      ],
+      cashflowItems: [['600519.SH', '20260715', '20260630', '1', 100, '1']],
+    });
+
+    const result = await createTushareMarketDataAdapter(client).getFundamentals({
+      code: stockCode('600519.SH'),
+      asOf: isoDate('2026-07-17'),
+    });
+
+    expect(result.data.operatingCashToNetProfit).toBe(0.5);
+  });
+
+  it.each([
+    ['income', 'Income statement permission unavailable'],
+    ['cashflow', 'Cash-flow statement permission unavailable'],
+  ] as const)(
+    'keeps financial indicators usable when %s permission is unavailable',
+    async (permissionDenied, reason) => {
+      const client = createFundamentalStatementClient({
+        permissionDenied,
+        incomeItems: [['600519.SH', '20260715', '20260630', '1', 100, '1']],
+        cashflowItems: [['600519.SH', '20260715', '20260630', '1', 120, '1']],
+      });
+
+      const result = await createTushareMarketDataAdapter(client).getFundamentals({
+        code: stockCode('600519.SH'),
+        asOf: isoDate('2026-07-17'),
+      });
+
+      expect(result.data).toMatchObject({ roe: 0.31, operatingCashToNetProfit: null });
+      expect(result.availability.operatingCashToNetProfit).toEqual({
+        status: 'missing',
+        reason,
+      });
+    },
+  );
 });

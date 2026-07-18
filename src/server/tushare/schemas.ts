@@ -4,15 +4,31 @@ const dailyRowSchema = z
   .object({
     ts_code: z.string(),
     trade_date: z.string(),
-    open: z.number().finite(),
-    high: z.number().finite(),
-    low: z.number().finite(),
-    close: z.number().finite(),
+    open: z.number().finite().positive(),
+    high: z.number().finite().positive(),
+    low: z.number().finite().positive(),
+    close: z.number().finite().positive(),
     vol: z.number().finite().nonnegative(),
     amount: z.number().finite().nonnegative(),
     adj_factor: z.number().finite().positive().nullable().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((row, context) => {
+    if (row.high < Math.max(row.open, row.close, row.low)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['high'],
+        message: 'High price must contain the OHLC range',
+      });
+    }
+    if (row.low > Math.min(row.open, row.close, row.high)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['low'],
+        message: 'Low price must contain the OHLC range',
+      });
+    }
+  });
 
 const dailyRowsSchema = z.array(dailyRowSchema);
 
@@ -36,6 +52,28 @@ const fundamentalRowSchema = z
     netprofit_yoy: z.number().finite().nullable(),
     ocf_to_opincome: z.number().finite().nullable().optional(),
     debt_to_assets: z.number().finite().nullable(),
+    update_flag: z.enum(['0', '1']).optional(),
+  })
+  .strict();
+
+const incomeStatementRowSchema = z
+  .object({
+    ts_code: z.string(),
+    ann_date: z.string(),
+    end_date: z.string(),
+    report_type: z.string(),
+    n_income_attr_p: z.number().finite().nullable(),
+    update_flag: z.enum(['0', '1']).optional(),
+  })
+  .strict();
+
+const cashflowStatementRowSchema = z
+  .object({
+    ts_code: z.string(),
+    ann_date: z.string(),
+    end_date: z.string(),
+    report_type: z.string(),
+    n_cashflow_act: z.number().finite().nullable(),
     update_flag: z.enum(['0', '1']).optional(),
   })
   .strict();
@@ -87,6 +125,14 @@ export function parseStockRows(value: unknown) {
 
 export function parseFundamentalRows(value: unknown) {
   return z.array(fundamentalRowSchema).parse(value);
+}
+
+export function parseIncomeStatementRows(value: unknown) {
+  return z.array(incomeStatementRowSchema).parse(value);
+}
+
+export function parseCashflowStatementRows(value: unknown) {
+  return z.array(cashflowStatementRowSchema).parse(value);
 }
 
 export function parseOverviewRows(value: unknown) {

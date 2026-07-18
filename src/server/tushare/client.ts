@@ -1,5 +1,6 @@
 import { AppError, notFound } from '../../domain/errors';
 import type {
+  Availability,
   DailyPrice,
   IsoDate,
   MarketEnvelope,
@@ -10,7 +11,11 @@ import type {
 } from '../../domain/stock';
 import { isoDate } from '../../domain/stock';
 import { mapDailyRows, mapFundamentalRows, mapOverviewRows, mapStockRows } from './mapper';
-import { parseProviderResponse } from './schemas';
+import {
+  parseCashflowStatementRows,
+  parseIncomeStatementRows,
+  parseProviderResponse,
+} from './schemas';
 
 type ProviderParameter = string | number | boolean;
 
@@ -52,6 +57,7 @@ interface TushareClientOptions {
 }
 
 const DEFAULT_ENDPOINT = 'https://api.tushare.pro';
+const OVERVIEW_LOOKBACK_DAYS = [14, 90, 366, 1_826] as const;
 
 export function createTushareClient(options: TushareClientOptions): TushareClient {
   if (options.token.length === 0) {
@@ -177,13 +183,17 @@ export function createTushareMarketDataAdapter(
           fields: ['ts_code', 'trade_date', 'adj_factor'],
         }),
       ]);
+      const dailyRows = tableRecords(dailyTable);
+      const adjustmentRows = tableRecords(adjustmentTable);
+      validateHistoryProviderRows(dailyRows, input.code, input.start, input.end);
+      validateHistoryProviderRows(adjustmentRows, input.code, input.start, input.end);
       const adjustments = new Map(
-        tableRecords(adjustmentTable).map((row) => [
+        adjustmentRows.map((row) => [
           `${String(row.ts_code)}:${String(row.trade_date)}`,
           row.adj_factor,
         ]),
       );
-      const rows = tableRecords(dailyTable).map((row) => ({
+      const rows = dailyRows.map((row) => ({
         ...row,
         adj_factor: adjustments.get(`${String(row.ts_code)}:${String(row.trade_date)}`) ?? null,
       }));
@@ -201,21 +211,18 @@ export function createTushareMarketDataAdapter(
     },
 
     async getOverview(input) {
-      const dateParams =
-        input.asOf === undefined
-          ? { ts_code: input.code }
-          : { ts_code: input.code, end_date: compactDate(input.asOf) };
+      const cutoff = input.asOf ?? currentDate(now);
+      const daily = await resolveLatestDailyRow(client, input.code, cutoff);
+      if (daily === undefined) {
+        throw notFound();
+      }
+      const tradeDate = String(daily.trade_date);
       const valuationQuery = {
         apiName: 'daily_basic',
-        params: dateParams,
+        params: { ts_code: input.code, trade_date: tradeDate },
         fields: ['ts_code', 'trade_date', 'pe_ttm', 'pb', 'total_mv'],
       } as const;
-      const [dailyTable, stockTable, valuationResult] = await Promise.all([
-        client.query({
-          apiName: 'daily',
-          params: dateParams,
-          fields: ['ts_code', 'trade_date', 'close', 'pre_close', 'pct_chg'],
-        }),
+      const [stockTable, valuationResult] = await Promise.all([
         client.query({
           apiName: 'stock_basic',
           params: { ts_code: input.code },
@@ -223,16 +230,8 @@ export function createTushareMarketDataAdapter(
         }),
         optionalPermissionTable(client, valuationQuery),
       ]);
-      const dailyRows = tableRecords(dailyTable);
       const stockRows = tableRecords(stockTable);
       const valuationRows = tableRecords(valuationResult.table);
-      const daily = latestProviderRow(dailyRows, input.code, input.asOf);
-      if (daily === undefined) {
-        if (dailyRows.some((row) => row.ts_code !== input.code)) {
-          throw providerUnavailable('CODE_MISMATCH');
-        }
-        throw notFound();
-      }
       const stock = stockRows.find((row) => row.ts_code === input.code);
       if (stock === undefined) {
         throw providerUnavailable(
@@ -269,12 +268,10 @@ export function createTushareMarketDataAdapter(
     },
 
     async getFundamentals(input) {
+      const cutoff = input.asOf ?? currentDate(now);
       const table = await client.query({
         apiName: 'fina_indicator',
-        params:
-          input.asOf === undefined
-            ? { ts_code: input.code }
-            : { ts_code: input.code, end_date: compactDate(input.asOf) },
+        params: { ts_code: input.code, end_date: compactDate(cutoff) },
         fields: [
           'ts_code',
           'ann_date',
@@ -288,7 +285,7 @@ export function createTushareMarketDataAdapter(
         ],
       });
       const mapped = mapProvider(() => mapFundamentalRows(tableRecords(table)))
-        .filter((row) => input.asOf === undefined || row.announcedAt <= input.asOf)
+        .filter((row) => row.announcedAt <= cutoff)
         .at(-1);
       if (mapped === undefined) {
         throw notFound();
@@ -297,7 +294,49 @@ export function createTushareMarketDataAdapter(
         throw providerUnavailable('CODE_MISMATCH');
       }
 
-      return marketEnvelope(mapped.data, mapped.announcedAt, mapped.availability);
+      const period = compactDate(mapped.data.date);
+      const incomeQuery = {
+        apiName: 'income',
+        params: { ts_code: input.code, period, report_type: '1' },
+        fields: [
+          'ts_code',
+          'ann_date',
+          'end_date',
+          'report_type',
+          'n_income_attr_p',
+          'update_flag',
+        ],
+      } as const;
+      const cashflowQuery = {
+        apiName: 'cashflow',
+        params: { ts_code: input.code, period, report_type: '1' },
+        fields: ['ts_code', 'ann_date', 'end_date', 'report_type', 'n_cashflow_act', 'update_flag'],
+      } as const;
+      const [incomeResult, cashflowResult] = await Promise.all([
+        optionalPermissionTable(client, incomeQuery),
+        optionalPermissionTable(client, cashflowQuery),
+      ]);
+      const quality = operatingCashToNetProfit({
+        incomeResult,
+        cashflowResult,
+        code: input.code,
+        period,
+        cutoff,
+      });
+      const data = {
+        ...mapped.data,
+        operatingCashToNetProfit: quality.value,
+      };
+      const availability = {
+        ...mapped.availability,
+        operatingCashToNetProfit: quality.availability,
+      };
+
+      return marketEnvelope(
+        data,
+        latestDate(mapped.announcedAt, quality.announcedAt),
+        availability,
+      );
     },
   };
 }
@@ -390,19 +429,88 @@ function currentDate(now: () => Date): IsoDate {
 function latestProviderRow(
   rows: Array<Record<string, unknown>>,
   code: StockCode,
-  asOf: IsoDate | undefined,
+  start: IsoDate,
+  end: IsoDate,
 ): Record<string, unknown> | undefined {
-  const cutoff = asOf === undefined ? undefined : compactDate(asOf);
+  const compactStart = compactDate(start);
+  const compactEnd = compactDate(end);
 
   return rows
     .filter(
       (row) =>
         row.ts_code === code &&
         typeof row.trade_date === 'string' &&
-        (cutoff === undefined || row.trade_date <= cutoff),
+        row.trade_date >= compactStart &&
+        row.trade_date <= compactEnd,
     )
     .sort((left, right) => String(left.trade_date).localeCompare(String(right.trade_date)))
     .at(-1);
+}
+
+async function resolveLatestDailyRow(
+  client: TushareClient,
+  code: StockCode,
+  cutoff: IsoDate,
+): Promise<Record<string, unknown> | undefined> {
+  const attemptedStarts = new Set<IsoDate>();
+
+  for (const lookbackDays of OVERVIEW_LOOKBACK_DAYS) {
+    const start = subtractDays(cutoff, lookbackDays);
+    if (attemptedStarts.has(start)) {
+      continue;
+    }
+    attemptedStarts.add(start);
+
+    const table = await client.query({
+      apiName: 'daily',
+      params: {
+        ts_code: code,
+        start_date: compactDate(start),
+        end_date: compactDate(cutoff),
+      },
+      fields: ['ts_code', 'trade_date', 'close', 'pre_close', 'pct_chg'],
+    });
+    const rows = tableRecords(table);
+    const daily = latestProviderRow(rows, code, start, cutoff);
+    if (daily !== undefined) {
+      return daily;
+    }
+    if (rows.some((row) => row.ts_code !== code)) {
+      throw providerUnavailable('CODE_MISMATCH');
+    }
+  }
+
+  return undefined;
+}
+
+function subtractDays(value: IsoDate, days: number): IsoDate {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  const result = date.toISOString().slice(0, 10);
+
+  return isoDate(result < '1900-01-01' ? '1900-01-01' : result);
+}
+
+function validateHistoryProviderRows(
+  rows: Array<Record<string, unknown>>,
+  code: StockCode,
+  start: IsoDate,
+  end: IsoDate,
+): void {
+  const compactStart = compactDate(start);
+  const compactEnd = compactDate(end);
+
+  for (const row of rows) {
+    if (row.ts_code !== code) {
+      throw providerUnavailable('CODE_MISMATCH');
+    }
+    if (typeof row.trade_date !== 'string') {
+      throw providerUnavailable('INVALID_SCHEMA');
+    }
+    if (row.trade_date < compactStart || row.trade_date > compactEnd) {
+      throw providerUnavailable('DATE_RANGE_MISMATCH');
+    }
+  }
 }
 
 async function optionalPermissionTable(
@@ -421,6 +529,121 @@ async function optionalPermissionTable(
 
     throw error;
   }
+}
+
+interface OptionalTableResult {
+  table: TushareTable;
+  permissionMissing: boolean;
+}
+
+interface OperatingCashMetric {
+  value: number | null;
+  availability: Availability<number>;
+  announcedAt?: IsoDate;
+}
+
+function operatingCashToNetProfit(input: {
+  incomeResult: OptionalTableResult;
+  cashflowResult: OptionalTableResult;
+  code: StockCode;
+  period: string;
+  cutoff: IsoDate;
+}): OperatingCashMetric {
+  if (input.incomeResult.permissionMissing) {
+    return missingOperatingCashMetric('Income statement permission unavailable');
+  }
+  if (input.cashflowResult.permissionMissing) {
+    return missingOperatingCashMetric('Cash-flow statement permission unavailable');
+  }
+
+  const incomeRows = optionalStatementRows(input.incomeResult.table, parseIncomeStatementRows);
+  const cashflowRows = optionalStatementRows(
+    input.cashflowResult.table,
+    parseCashflowStatementRows,
+  );
+  const income = selectStatementRow(incomeRows, input.code, input.period, input.cutoff);
+  if (income === undefined || incomeRows === undefined) {
+    return missingOperatingCashMetric('Income statement is unavailable for the selected period');
+  }
+  const cashflow = selectStatementRow(cashflowRows, input.code, input.period, input.cutoff);
+  if (cashflow === undefined || cashflowRows === undefined) {
+    return missingOperatingCashMetric('Cash-flow statement is unavailable for the selected period');
+  }
+  if (income.n_income_attr_p === null) {
+    return missingOperatingCashMetric(
+      'Parent-attributable net profit is unavailable for the selected period',
+    );
+  }
+  if (cashflow.n_cashflow_act === null) {
+    return missingOperatingCashMetric('Operating cash flow is unavailable for the selected period');
+  }
+  if (income.n_income_attr_p === 0) {
+    return missingOperatingCashMetric('Parent-attributable net profit is zero');
+  }
+
+  const value = cashflow.n_cashflow_act / income.n_income_attr_p;
+  return {
+    value,
+    availability: { status: 'available', value },
+    announcedAt: latestDate(providerDate(income.ann_date), providerDate(cashflow.ann_date)),
+  };
+}
+
+function optionalStatementRows<T>(
+  table: TushareTable,
+  parse: (value: unknown) => T[],
+): T[] | undefined {
+  try {
+    return parse(tableRecords(table));
+  } catch {
+    return undefined;
+  }
+}
+
+function selectStatementRow<
+  T extends {
+    ts_code: string;
+    ann_date: string;
+    end_date: string;
+    report_type: string;
+    update_flag?: '0' | '1' | undefined;
+  },
+>(rows: T[] | undefined, code: StockCode, period: string, cutoff: IsoDate): T | undefined {
+  const compactCutoff = compactDate(cutoff);
+  return rows
+    ?.filter(
+      (row) =>
+        row.ts_code === code &&
+        row.end_date === period &&
+        row.report_type === '1' &&
+        row.ann_date <= compactCutoff,
+    )
+    .sort(
+      (left, right) =>
+        left.ann_date.localeCompare(right.ann_date) ||
+        (left.update_flag ?? '0').localeCompare(right.update_flag ?? '0'),
+    )
+    .at(-1);
+}
+
+function missingOperatingCashMetric(reason: string): OperatingCashMetric {
+  return { value: null, availability: { status: 'missing', reason } };
+}
+
+function providerDate(value: string): IsoDate {
+  if (!/^\d{8}$/.test(value)) {
+    throw providerUnavailable('INVALID_SCHEMA');
+  }
+
+  try {
+    return isoDate(`${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`);
+  } catch {
+    throw providerUnavailable('INVALID_SCHEMA');
+  }
+}
+
+function latestDate(left: IsoDate, right: IsoDate | undefined): IsoDate {
+  return right === undefined || left >= right ? left : right;
 }
 
 function forwardAdjust(history: DailyPrice[]): DailyPrice[] {

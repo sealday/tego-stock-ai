@@ -13,12 +13,15 @@ interface TokenBucketOptions {
   capacity: number;
   refillTokens: number;
   refillIntervalMs: number;
+  idleTtlMs?: number;
+  maxBuckets?: number;
   now?: () => number;
 }
 
 interface TokenBucketState {
   tokens: number;
   lastRefill: number;
+  lastSeen: number;
 }
 
 export interface SafeLogger {
@@ -48,12 +51,17 @@ const DEFAULT_LOGGER: SafeLogger = {
 };
 
 export function createTokenBucket(options: TokenBucketOptions): RateLimiter {
+  const idleTtlMs = options.idleTtlMs ?? 10 * 60_000;
+  const maxBuckets = options.maxBuckets ?? 10_000;
   if (
     !Number.isInteger(options.capacity) ||
     options.capacity <= 0 ||
     !Number.isInteger(options.refillTokens) ||
     options.refillTokens <= 0 ||
-    options.refillIntervalMs <= 0
+    options.refillIntervalMs <= 0 ||
+    idleTtlMs <= 0 ||
+    !Number.isInteger(maxBuckets) ||
+    maxBuckets <= 0
   ) {
     throw new TypeError('Invalid token bucket configuration');
   }
@@ -64,7 +72,15 @@ export function createTokenBucket(options: TokenBucketOptions): RateLimiter {
   return {
     consume(key) {
       const timestamp = now();
-      const state = buckets.get(key) ?? { tokens: options.capacity, lastRefill: timestamp };
+      evictIdleBuckets(buckets, timestamp, idleTtlMs);
+      let state = buckets.get(key);
+      if (state === undefined) {
+        evictLeastRecentlyUsedBucket(buckets, maxBuckets);
+        state = { tokens: options.capacity, lastRefill: timestamp, lastSeen: timestamp };
+      } else {
+        buckets.delete(key);
+        state.lastSeen = timestamp;
+      }
       const elapsed = Math.max(0, timestamp - state.lastRefill);
       const intervals = Math.floor(elapsed / options.refillIntervalMs);
 
@@ -89,6 +105,33 @@ export function createTokenBucket(options: TokenBucketOptions): RateLimiter {
       };
     },
   };
+}
+
+function evictIdleBuckets(
+  buckets: Map<string, TokenBucketState>,
+  timestamp: number,
+  idleTtlMs: number,
+): void {
+  for (const [key, state] of buckets) {
+    if (timestamp - state.lastSeen < idleTtlMs) {
+      break;
+    }
+    buckets.delete(key);
+  }
+}
+
+function evictLeastRecentlyUsedBucket(
+  buckets: Map<string, TokenBucketState>,
+  maxBuckets: number,
+): void {
+  if (buckets.size < maxBuckets) {
+    return;
+  }
+
+  const leastRecentlyUsedKey = buckets.keys().next().value;
+  if (leastRecentlyUsedKey !== undefined) {
+    buckets.delete(leastRecentlyUsedKey);
+  }
 }
 
 export function createHttpHandler<T>(options: HttpHandlerOptions<T>) {

@@ -43,8 +43,8 @@ export function mapFundamentalRows(
   return parseFundamentalRows(value)
     .sort(
       (left, right) =>
-        left.ann_date.localeCompare(right.ann_date) ||
         left.end_date.localeCompare(right.end_date) ||
+        left.ann_date.localeCompare(right.ann_date) ||
         (left.update_flag ?? '0').localeCompare(right.update_flag ?? '0'),
     )
     .map((row) => {

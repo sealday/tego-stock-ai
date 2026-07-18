@@ -167,6 +167,40 @@ describe('public stock API', () => {
     });
   });
 
+  it('accepts a valid short history range near the upper supported date bound', async () => {
+    const adapter = createAdapter();
+    const response = await createHistoryHandler({ adapter })(
+      new Request(
+        'https://stocks.example.com/api/stocks/600519.SH/history?start=2091-01-01&end=2100-12-31&adjust=forward',
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(adapter.getHistory).toHaveBeenCalledWith({
+      code: MOUTAI,
+      start: isoDate('2091-01-01'),
+      end: isoDate('2100-12-31'),
+      adjust: 'forward',
+    });
+  });
+
+  it.each([
+    ['2020-02-29', '2030-02-28', 200],
+    ['2020-02-29', '2030-03-01', 400],
+    ['2090-01-01', '2100-01-02', 400],
+  ])('applies the ten-year boundary from %s through %s', async (start, end, status) => {
+    const response = await createHistoryHandler({ adapter: createAdapter() })(
+      new Request(
+        `https://stocks.example.com/api/stocks/600519.SH/history?start=${start}&end=${end}&adjust=forward`,
+      ),
+    );
+
+    expect(response.status).toBe(status);
+    if (status === 400) {
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'INVALID_INPUT' } });
+    }
+  });
+
   it.each([
     'start=2016-07-16&end=2026-07-17&adjust=forward',
     'start=2026-07-01&end=2026-07-17&adjust=backward',
@@ -202,6 +236,46 @@ describe('public stock API', () => {
 
     now += 1_000;
     expect((await handler(request())).status).toBe(200);
+  });
+
+  it('evicts idle token buckets before their normal refill interval', () => {
+    let now = 0;
+    const rateLimiter = createTokenBucket({
+      capacity: 1,
+      refillTokens: 1,
+      refillIntervalMs: 100_000,
+      idleTtlMs: 1_000,
+      maxBuckets: 10,
+      now: () => now,
+    });
+
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(true);
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(false);
+
+    now = 1_001;
+    expect(rateLimiter.consume('198.51.100.2').allowed).toBe(true);
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(true);
+  });
+
+  it('evicts the least recently used bucket when the hard cap is reached', () => {
+    let now = 0;
+    const rateLimiter = createTokenBucket({
+      capacity: 1,
+      refillTokens: 1,
+      refillIntervalMs: 100_000,
+      idleTtlMs: 100_000,
+      maxBuckets: 2,
+      now: () => now,
+    });
+
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(true);
+    now = 1;
+    expect(rateLimiter.consume('198.51.100.2').allowed).toBe(true);
+    now = 2;
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(false);
+    now = 3;
+    expect(rateLimiter.consume('198.51.100.3').allowed).toBe(true);
+    expect(rateLimiter.consume('198.51.100.2').allowed).toBe(true);
   });
 
   it('preserves field-level missing-data reasons in a successful overview', async () => {

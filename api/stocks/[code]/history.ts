@@ -64,13 +64,13 @@ function requestDate(value: string | null): IsoDate {
   }
 }
 
-function maximumEndDate(start: IsoDate): IsoDate {
+function maximumEndDate(start: IsoDate): string {
   const year = Number(start.slice(0, 4)) + 10;
-  const sameMonthAndDay = `${year}${start.slice(4)}`;
+  const monthAndDay = start.slice(4);
 
-  try {
-    return isoDate(sameMonthAndDay);
-  } catch {
-    return isoDate(`${year}-02-28`);
-  }
+  return monthAndDay === '-02-29' && !isLeapYear(year) ? `${year}-02-28` : `${year}${monthAndDay}`;
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
