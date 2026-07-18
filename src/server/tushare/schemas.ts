@@ -84,8 +84,8 @@ const overviewSchema = z.object({
       .object({
         ts_code: z.string(),
         trade_date: z.string(),
-        close: z.number().finite(),
-        pre_close: z.number().finite().nullable(),
+        close: z.number().finite().positive(),
+        pre_close: z.number().finite().positive().nullable(),
         pct_chg: z.number().finite().nullable(),
       })
       .strict(),

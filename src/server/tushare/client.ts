@@ -562,23 +562,34 @@ function operatingCashToNetProfit(input: {
     parseCashflowStatementRows,
   );
   const income = selectStatementRow(incomeRows, input.code, input.period, input.cutoff);
-  if (income === undefined || incomeRows === undefined) {
-    return missingOperatingCashMetric('Income statement is unavailable for the selected period');
-  }
   const cashflow = selectStatementRow(cashflowRows, input.code, input.period, input.cutoff);
-  if (cashflow === undefined || cashflowRows === undefined) {
-    return missingOperatingCashMetric('Cash-flow statement is unavailable for the selected period');
+  const announcedAt = latestStatementDate(income?.ann_date, cashflow?.ann_date);
+  if (income === undefined) {
+    return missingOperatingCashMetric(
+      'Income statement is unavailable for the selected period',
+      announcedAt,
+    );
+  }
+  if (cashflow === undefined) {
+    return missingOperatingCashMetric(
+      'Cash-flow statement is unavailable for the selected period',
+      announcedAt,
+    );
   }
   if (income.n_income_attr_p === null) {
     return missingOperatingCashMetric(
       'Parent-attributable net profit is unavailable for the selected period',
+      announcedAt,
     );
   }
   if (cashflow.n_cashflow_act === null) {
-    return missingOperatingCashMetric('Operating cash flow is unavailable for the selected period');
+    return missingOperatingCashMetric(
+      'Operating cash flow is unavailable for the selected period',
+      announcedAt,
+    );
   }
   if (income.n_income_attr_p === 0) {
-    return missingOperatingCashMetric('Parent-attributable net profit is zero');
+    return missingOperatingCashMetric('Parent-attributable net profit is zero', announcedAt);
   }
 
   const value = cashflow.n_cashflow_act / income.n_income_attr_p;
@@ -589,15 +600,8 @@ function operatingCashToNetProfit(input: {
   };
 }
 
-function optionalStatementRows<T>(
-  table: TushareTable,
-  parse: (value: unknown) => T[],
-): T[] | undefined {
-  try {
-    return parse(tableRecords(table));
-  } catch {
-    return undefined;
-  }
+function optionalStatementRows<T>(table: TushareTable, parse: (value: unknown) => T[]): T[] {
+  return mapProvider(() => parse(tableRecords(table)));
 }
 
 function selectStatementRow<
@@ -608,10 +612,10 @@ function selectStatementRow<
     report_type: string;
     update_flag?: '0' | '1' | undefined;
   },
->(rows: T[] | undefined, code: StockCode, period: string, cutoff: IsoDate): T | undefined {
+>(rows: T[], code: StockCode, period: string, cutoff: IsoDate): T | undefined {
   const compactCutoff = compactDate(cutoff);
   return rows
-    ?.filter(
+    .filter(
       (row) =>
         row.ts_code === code &&
         row.end_date === period &&
@@ -626,8 +630,23 @@ function selectStatementRow<
     .at(-1);
 }
 
-function missingOperatingCashMetric(reason: string): OperatingCashMetric {
-  return { value: null, availability: { status: 'missing', reason } };
+function missingOperatingCashMetric(reason: string, announcedAt?: IsoDate): OperatingCashMetric {
+  return {
+    value: null,
+    availability: { status: 'missing', reason },
+    ...(announcedAt === undefined ? {} : { announcedAt }),
+  };
+}
+
+function latestStatementDate(
+  incomeAnnouncedAt: string | undefined,
+  cashflowAnnouncedAt: string | undefined,
+): IsoDate | undefined {
+  const incomeDate = incomeAnnouncedAt === undefined ? undefined : providerDate(incomeAnnouncedAt);
+  const cashflowDate =
+    cashflowAnnouncedAt === undefined ? undefined : providerDate(cashflowAnnouncedAt);
+
+  return incomeDate === undefined ? cashflowDate : latestDate(incomeDate, cashflowDate);
 }
 
 function providerDate(value: string): IsoDate {

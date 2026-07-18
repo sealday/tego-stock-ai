@@ -238,23 +238,23 @@ describe('public stock API', () => {
     expect((await handler(request())).status).toBe(200);
   });
 
-  it('evicts idle token buckets before their normal refill interval', () => {
+  it('does not reset an exhausted bucket before it would be fully refilled', () => {
     let now = 0;
     const rateLimiter = createTokenBucket({
-      capacity: 1,
+      capacity: 2,
       refillTokens: 1,
-      refillIntervalMs: 100_000,
-      idleTtlMs: 1_000,
+      refillIntervalMs: 1_000,
+      idleTtlMs: 500,
       maxBuckets: 10,
       now: () => now,
     });
 
     expect(rateLimiter.consume('198.51.100.1').allowed).toBe(true);
-    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(false);
-
-    now = 1_001;
-    expect(rateLimiter.consume('198.51.100.2').allowed).toBe(true);
     expect(rateLimiter.consume('198.51.100.1').allowed).toBe(true);
+
+    now = 1_500;
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(true);
+    expect(rateLimiter.consume('198.51.100.1').allowed).toBe(false);
   });
 
   it('evicts the least recently used bucket when the hard cap is reached', () => {

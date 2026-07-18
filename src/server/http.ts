@@ -72,7 +72,14 @@ export function createTokenBucket(options: TokenBucketOptions): RateLimiter {
   return {
     consume(key) {
       const timestamp = now();
-      evictIdleBuckets(buckets, timestamp, idleTtlMs);
+      evictIdleBuckets(
+        buckets,
+        timestamp,
+        idleTtlMs,
+        options.capacity,
+        options.refillTokens,
+        options.refillIntervalMs,
+      );
       let state = buckets.get(key);
       if (state === undefined) {
         evictLeastRecentlyUsedBucket(buckets, maxBuckets);
@@ -111,12 +118,19 @@ function evictIdleBuckets(
   buckets: Map<string, TokenBucketState>,
   timestamp: number,
   idleTtlMs: number,
+  capacity: number,
+  refillTokens: number,
+  refillIntervalMs: number,
 ): void {
   for (const [key, state] of buckets) {
     if (timestamp - state.lastSeen < idleTtlMs) {
       break;
     }
-    buckets.delete(key);
+    const elapsed = Math.max(0, timestamp - state.lastRefill);
+    const intervals = Math.floor(elapsed / refillIntervalMs);
+    if (state.tokens + intervals * refillTokens >= capacity) {
+      buckets.delete(key);
+    }
   }
 }
 
