@@ -5,9 +5,9 @@ playwright-report/
 test-results/
 .vercel/
 .superpowers/
+.worktrees/
 .env
 .env.*
 !.env.example
 *.local
 .DS_Store
-
