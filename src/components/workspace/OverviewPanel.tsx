@@ -1,5 +1,7 @@
+import type { ExplainableScore } from '../../analysis/scores';
 import type { AvailabilityMap } from '../../domain/stock';
 import type { StockWorkspaceState } from '../../hooks/use-stock-workspace';
+import { PriceChart } from '../charts/PriceChart';
 import { DataStatus } from './DataStatus';
 
 export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }) {
@@ -34,21 +36,9 @@ export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }
       </div>
 
       <div className="score-grid" aria-label="确定性量化评分">
-        <ScoreCard
-          label="趋势评分"
-          score={state.analysis.trend.score}
-          band={state.analysis.trend.band}
-        />
-        <ScoreCard
-          label="财务质量"
-          score={state.analysis.quality.score}
-          band={state.analysis.quality.band}
-        />
-        <ScoreCard
-          label="估值位置"
-          score={state.analysis.valuation.score}
-          band={state.analysis.valuation.band}
-        />
+        <ScoreCard label="趋势评分" score={state.analysis.trend} />
+        <ScoreCard label="财务质量" score={state.analysis.quality} />
+        <ScoreCard label="估值位置" score={state.analysis.valuation} />
       </div>
 
       <dl className="metric-grid">
@@ -77,6 +67,30 @@ export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }
           reason={missingReason(availability, 'previousClose')}
         />
       </dl>
+
+      <OverviewPriceChart state={state} />
+    </section>
+  );
+}
+
+function OverviewPriceChart({ state }: { readonly state: StockWorkspaceState }) {
+  let content;
+  if (state.history.status === 'loading') {
+    content = <p role="status">主要价格图加载中…</p>;
+  } else if (state.history.status === 'error') {
+    content = <p role="alert">主要价格图不可用：{state.history.message}</p>;
+  } else if (state.analysis.technical === null || state.history.envelope.data.length === 0) {
+    content = <p className="missing-value">历史数据不足，无法显示主要价格图。</p>;
+  } else {
+    content = (
+      <PriceChart history={state.history.envelope.data} indicators={state.analysis.technical} />
+    );
+  }
+
+  return (
+    <section className="overview-price-chart" aria-labelledby="overview-price-chart-heading">
+      <h3 id="overview-price-chart-heading">主要价格图</h3>
+      {content}
     </section>
   );
 }
@@ -104,26 +118,47 @@ function ChangeLabel({
   );
 }
 
-function ScoreCard({
-  label,
-  score,
-  band,
-}: {
-  readonly label: string;
-  readonly score: number | null;
-  readonly band: string | null;
-}) {
+function ScoreCard({ label, score }: { readonly label: string; readonly score: ExplainableScore }) {
   return (
     <article className="score-card">
       <h3>{label}</h3>
-      {score === null ? (
+      {score.score === null ? (
         <p className="missing-value">参考数据不足</p>
       ) : (
         <>
-          <strong>{score.toFixed(1)} / 100</strong>
-          <span>{bandLabel(band)}</span>
+          <strong>{score.score.toFixed(1)} / 100</strong>
+          <span>{bandLabel(score.band)}</span>
         </>
       )}
+      {score.observations.length > 0 ? (
+        <ul className="score-card__evidence" aria-label={`${label}计算证据`}>
+          {score.observations.map((observation) => (
+            <li key={observation.key}>
+              <span>{observation.label}</span>
+              <span>
+                加权贡献：
+                {observation.weightedContribution === null
+                  ? '不可计算'
+                  : `${(observation.weightedContribution * 100).toFixed(1)} 分`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {score.missingDetails.length > 0 ? (
+        <ul className="score-card__missing" aria-label={`${label}数据缺口`}>
+          {score.missingDetails.map((detail) => (
+            <li key={detail.key}>
+              <span>{detail.label}</span>
+              <span>
+                {detail.reason === 'insufficient-reference'
+                  ? `参考样本不足（${detail.availableReferenceCount}/${detail.requiredReferenceCount}）`
+                  : '数据缺失'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </article>
   );
 }

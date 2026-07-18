@@ -19,10 +19,10 @@ export function App() {
   return (
     <TerminalShell
       selectedStock={selectedStock}
-      marketState="日线收盘数据"
+      marketState={workspace.marketState}
       source={workspace.source}
       cutoff={workspace.cutoff}
-      freshness={workspace.freshness}
+      dataStatus={workspace.dataStatus}
       lastSuccessfulAt={workspace.lastSuccessfulAt}
       onStockSelect={setSelectedStock}
     >

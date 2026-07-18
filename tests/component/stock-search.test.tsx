@@ -149,7 +149,7 @@ describe('TerminalShell', () => {
         marketState="已收盘"
         source="Tushare Pro"
         cutoff="2026-07-17"
-        freshness="stale"
+        dataStatus="stale"
         lastSuccessfulAt="2026-07-17T08:31:00.000Z"
         onStockSelect={vi.fn()}
         search={vi.fn<StockSearchFunction>()}
@@ -171,9 +171,33 @@ describe('TerminalShell', () => {
     expect(screen.getByText('600519.SH')).toBeVisible();
     expect(screen.getByText('已收盘')).toBeVisible();
     expect(screen.getByText('数据延迟')).toBeVisible();
-    expect(screen.getByText(/2026-07-17/)).toBeVisible();
+    expect(screen.getAllByText(/2026-07-17/).length).toBeGreaterThan(0);
     expect(screen.getByText('Tushare Pro')).toBeVisible();
     expect(screen.getByText('展开导航')).toBeVisible();
     expect(screen.getByRole('group')).toBeVisible();
+  });
+
+  it.each([
+    ['loading', '加载中'],
+    ['fresh', '数据就绪'],
+    ['stale', '数据延迟'],
+    ['partial', '部分异常'],
+    ['error', '不可用'],
+  ] as const)('shows %s workspace data as %s', (dataStatus, label) => {
+    render(
+      <TerminalShell
+        selectedStock={MOUTAI}
+        marketState="已收盘"
+        source="Tushare Pro"
+        cutoff="2026-07-17"
+        dataStatus={dataStatus}
+        onStockSelect={vi.fn()}
+        search={vi.fn<StockSearchFunction>()}
+      >
+        <h1>测试终端</h1>
+      </TerminalShell>,
+    );
+
+    expect(screen.getByText(label)).toBeVisible();
   });
 });

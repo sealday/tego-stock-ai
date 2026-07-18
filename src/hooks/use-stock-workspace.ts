@@ -30,6 +30,16 @@ export type WorkspaceResource<T> =
   | { readonly status: 'success'; readonly envelope: MarketEnvelope<T> }
   | { readonly status: 'error'; readonly message: string };
 
+export type WorkspaceDataStatus = 'loading' | 'fresh' | 'stale' | 'partial' | 'error';
+
+type WorkspaceResourceStatus =
+  | { readonly status: 'loading' }
+  | { readonly status: 'error' }
+  | {
+      readonly status: 'success';
+      readonly envelope: { readonly freshness: MarketEnvelope<unknown>['freshness'] };
+    };
+
 export interface WorkspaceAnalysis {
   readonly technical: TechnicalIndicators | null;
   readonly trend: ExplainableScore;
@@ -42,6 +52,8 @@ export interface StockWorkspaceState {
   readonly cutoff: IsoDate;
   readonly source: 'Tushare Pro';
   readonly freshness: MarketEnvelope<unknown>['freshness'];
+  readonly dataStatus: WorkspaceDataStatus;
+  readonly marketState: string;
   readonly lastSuccessfulAt?: string | undefined;
   readonly overview: WorkspaceResource<StockOverview>;
   readonly history: WorkspaceResource<readonly DailyPrice[]>;
@@ -54,6 +66,7 @@ export interface UseStockWorkspaceOptions {
   readonly code: StockCode;
   readonly asOf: IsoDate;
   readonly fetchClient?: WorkspaceFetchClient | undefined;
+  readonly now?: (() => Date) | undefined;
 }
 
 const SAFE_RESOURCE_ERROR = '该数据项暂时不可用，请稍后重试。';
@@ -62,6 +75,7 @@ export function useStockWorkspace({
   code,
   asOf,
   fetchClient = fetch,
+  now = currentTime,
 }: UseStockWorkspaceOptions): StockWorkspaceState {
   const [overview, setOverview] = useState<WorkspaceResource<StockOverview>>({ status: 'loading' });
   const [history, setHistory] = useState<WorkspaceResource<readonly DailyPrice[]>>({
@@ -141,12 +155,15 @@ export function useStockWorkspace({
     (resource) => resource.status === 'success' && resource.envelope.freshness === 'stale',
   );
   const snapshot = marketStatus.status === 'success' ? marketStatus.envelope.data : undefined;
+  const resources = [overview, history, fundamentals, marketStatus];
 
   return {
     code,
     cutoff: overview.status === 'success' ? overview.envelope.asOf : asOf,
     source: 'Tushare Pro',
     freshness: hasStaleResource || snapshot?.freshness === 'stale' ? 'stale' : 'fresh',
+    dataStatus: aggregateWorkspaceDataStatus(resources),
+    marketState: deriveMarketState(marketStatus, now()),
     ...(snapshot === undefined ? {} : { lastSuccessfulAt: snapshot.lastSuccessfulAt }),
     overview,
     history,
@@ -154,6 +171,122 @@ export function useStockWorkspace({
     marketStatus,
     analysis,
   };
+}
+
+export function aggregateWorkspaceDataStatus(
+  resources: readonly WorkspaceResourceStatus[],
+): WorkspaceDataStatus {
+  if (
+    resources.some(
+      (resource) => resource.status === 'success' && resource.envelope.freshness === 'stale',
+    )
+  ) {
+    return 'stale';
+  }
+  if (resources.some((resource) => resource.status === 'loading')) {
+    return 'loading';
+  }
+
+  const successCount = resources.filter((resource) => resource.status === 'success').length;
+  const errorCount = resources.filter((resource) => resource.status === 'error').length;
+  if (successCount === 0 && errorCount > 0) {
+    return 'error';
+  }
+  if (successCount > 0 && errorCount > 0) {
+    return 'partial';
+  }
+  return 'fresh';
+}
+
+export function deriveMarketState(
+  marketStatus: WorkspaceResource<MarketSnapshotStatus>,
+  now: Date,
+): string {
+  if (marketStatus.status === 'loading') {
+    return '市场状态加载中';
+  }
+  if (marketStatus.status === 'error' || Number.isNaN(now.valueOf())) {
+    return '市场状态不可用';
+  }
+
+  const { envelope } = marketStatus;
+  if (envelope.freshness === 'stale' || envelope.data.freshness === 'stale') {
+    return '市场状态延迟';
+  }
+
+  const current = shanghaiTimeParts(now);
+  const nextTradingDate = shanghaiTimeParts(new Date(envelope.data.nextExpectedCloseAt)).date;
+  if (current.date === nextTradingDate) {
+    const minutes = current.hour * 60 + current.minute;
+    if (minutes < 9 * 60 + 30) {
+      return '未开盘';
+    }
+    if (minutes < 11 * 60 + 30) {
+      return '交易时段（非实时）';
+    }
+    if (minutes < 13 * 60) {
+      return '午间休市';
+    }
+    if (minutes < 15 * 60) {
+      return '交易时段（非实时）';
+    }
+    return '已收盘';
+  }
+
+  if (envelope.data.asOf === current.date) {
+    return '已收盘';
+  }
+  return '休市';
+}
+
+export function formatShanghaiTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) {
+    return value;
+  }
+  const parts = shanghaiTimeParts(date);
+  return `${parts.date} ${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
+}
+
+function currentTime(): Date {
+  return new Date();
+}
+
+function shanghaiTimeParts(date: Date): {
+  readonly date: string;
+  readonly hour: number;
+  readonly minute: number;
+  readonly second: number;
+} {
+  const values: Record<string, string> = {};
+  for (const part of new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)) {
+    if (part.type !== 'literal') {
+      values[part.type] = part.value;
+    }
+  }
+
+  const year = values.year ?? '0000';
+  const month = values.month ?? '00';
+  const day = values.day ?? '00';
+  return {
+    date: `${year}-${month}-${day}`,
+    hour: Number(values.hour ?? 0),
+    minute: Number(values.minute ?? 0),
+    second: Number(values.second ?? 0),
+  };
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, '0');
 }
 
 export function createWorkspaceAnalysis(

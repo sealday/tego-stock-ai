@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { WORKSPACE_TABS, type WorkspaceTabId } from '../../app/routes';
-import type { StockWorkspaceState } from '../../hooks/use-stock-workspace';
+import { formatShanghaiTimestamp, type StockWorkspaceState } from '../../hooks/use-stock-workspace';
 import { DataStatus } from './DataStatus';
 import { FinancialTrendsPanel } from './FinancialTrendsPanel';
 import { FundamentalsPanel } from './FundamentalsPanel';
@@ -40,7 +40,9 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
       {state.freshness === 'stale' && state.lastSuccessfulAt !== undefined ? (
         <p className="stale-banner">
           数据延迟 · 最后成功更新{' '}
-          <time dateTime={state.lastSuccessfulAt}>{formatTimestamp(state.lastSuccessfulAt)}</time>
+          <time dateTime={state.lastSuccessfulAt}>
+            {formatShanghaiTimestamp(state.lastSuccessfulAt)}
+          </time>
         </p>
       ) : null}
 
@@ -76,6 +78,8 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
         {activeTab === 'ai-report' ? <AiReportPlaceholder /> : null}
       </div>
 
+      <WorkspaceLimitations state={state} />
+
       <footer className="research-disclaimer">
         <strong>研究边界</strong>
         <p>
@@ -83,6 +87,29 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
         </p>
       </footer>
     </article>
+  );
+}
+
+function WorkspaceLimitations({ state }: { readonly state: StockWorkspaceState }) {
+  const limitations = [state.overview, state.history, state.fundamentals, state.marketStatus]
+    .flatMap((resource) =>
+      resource.status === 'success' ? [...resource.envelope.limitations] : [],
+    )
+    .filter((limitation, index, all) => all.indexOf(limitation) === index);
+
+  return (
+    <aside className="workspace-limitations" aria-labelledby="workspace-limitations-heading">
+      <h2 id="workspace-limitations-heading">数据限制</h2>
+      {limitations.length === 0 ? (
+        <p>当前成功数据未声明额外限制。</p>
+      ) : (
+        <ul>
+          {limitations.map((limitation) => (
+            <li key={limitation}>{limitation}</li>
+          ))}
+        </ul>
+      )}
+    </aside>
   );
 }
 
@@ -97,9 +124,4 @@ function AiReportPlaceholder() {
       </p>
     </section>
   );
-}
-
-function formatTimestamp(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString('zh-CN', { hour12: false });
 }

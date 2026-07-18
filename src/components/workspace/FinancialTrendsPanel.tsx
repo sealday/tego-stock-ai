@@ -1,3 +1,4 @@
+import type { AvailabilityMap } from '../../domain/stock';
 import type { StockWorkspaceState } from '../../hooks/use-stock-workspace';
 
 export function FinancialTrendsPanel({ state }: { readonly state: StockWorkspaceState }) {
@@ -13,7 +14,7 @@ export function FinancialTrendsPanel({ state }: { readonly state: StockWorkspace
       </section>
     );
   }
-  const data = state.fundamentals.envelope.data;
+  const { data, availability } = state.fundamentals.envelope;
   return (
     <section className="workspace-panel" aria-labelledby="trends-heading">
       <div className="panel-heading-row">
@@ -33,6 +34,7 @@ export function FinancialTrendsPanel({ state }: { readonly state: StockWorkspace
               <th scope="col">报告期</th>
               <th scope="col">数值</th>
               <th scope="col">单位</th>
+              <th scope="col">状态</th>
             </tr>
           </thead>
           <tbody>
@@ -41,22 +43,37 @@ export function FinancialTrendsPanel({ state }: { readonly state: StockWorkspace
               <td>{data.date}</td>
               <td>{data.roe === null ? '—' : (data.roe * 100).toFixed(2)}</td>
               <td>%</td>
+              <td>{availabilityLabel(availability, 'roe', data.roe)}</td>
             </tr>
             <tr>
               <th scope="row">毛利率</th>
               <td>{data.date}</td>
               <td>{data.grossMargin === null ? '—' : (data.grossMargin * 100).toFixed(2)}</td>
               <td>%</td>
+              <td>{availabilityLabel(availability, 'grossMargin', data.grossMargin)}</td>
             </tr>
             <tr>
               <th scope="row">营收增长</th>
               <td>{data.date}</td>
               <td>{data.revenueGrowth === null ? '—' : (data.revenueGrowth * 100).toFixed(2)}</td>
               <td>%</td>
+              <td>{availabilityLabel(availability, 'revenueGrowth', data.revenueGrowth)}</td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
   );
+}
+
+function availabilityLabel(
+  availability: AvailabilityMap,
+  key: string,
+  value: number | null,
+): string {
+  if (value !== null) {
+    return '可用';
+  }
+  const entry = availability[key];
+  return `缺失：${entry?.status === 'missing' ? entry.reason : '未提供'}`;
 }

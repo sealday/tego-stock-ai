@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
 
 import { PRIMARY_NAVIGATION } from '../../app/routes';
-import type { MarketEnvelope, StockSearchResult } from '../../domain/stock';
+import type { StockSearchResult } from '../../domain/stock';
+import { formatShanghaiTimestamp, type WorkspaceDataStatus } from '../../hooks/use-stock-workspace';
 import { StockSearch, type StockSearchFunction } from '../search/StockSearch';
 
 export interface TerminalShellProps {
@@ -9,7 +10,7 @@ export interface TerminalShellProps {
   readonly marketState: string;
   readonly source: string;
   readonly cutoff: string;
-  readonly freshness: MarketEnvelope<unknown>['freshness'];
+  readonly dataStatus: WorkspaceDataStatus;
   readonly lastSuccessfulAt?: string | undefined;
   readonly onStockSelect: (stock: StockSearchResult) => void;
   readonly search?: StockSearchFunction | undefined;
@@ -22,7 +23,7 @@ export function TerminalShell({
   marketState,
   source,
   cutoff,
-  freshness,
+  dataStatus,
   lastSuccessfulAt,
   onStockSelect,
   search,
@@ -72,8 +73,8 @@ export function TerminalShell({
             </div>
             <div>
               <dt>数据</dt>
-              <dd className={`freshness freshness--${freshness}`}>
-                {freshness === 'fresh' ? '数据就绪' : '数据延迟'}
+              <dd className={`freshness freshness--${dataStatus}`}>
+                {dataStatusLabel(dataStatus)}
               </dd>
             </div>
             <div>
@@ -87,10 +88,10 @@ export function TerminalShell({
               <dd>{source}</dd>
             </div>
           </dl>
-          {freshness === 'stale' && lastSuccessfulAt !== undefined ? (
+          {dataStatus === 'stale' && lastSuccessfulAt !== undefined ? (
             <p className="terminal-topbar__stale-note">
               最后成功更新：
-              <time dateTime={lastSuccessfulAt}>{formatTimestamp(lastSuccessfulAt)}</time>
+              <time dateTime={lastSuccessfulAt}>{formatShanghaiTimestamp(lastSuccessfulAt)}</time>
             </p>
           ) : null}
         </header>
@@ -153,7 +154,12 @@ function Watchlist({ stocks }: { readonly stocks: readonly StockSearchResult[] }
   );
 }
 
-function formatTimestamp(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString('zh-CN', { hour12: false });
+function dataStatusLabel(status: WorkspaceDataStatus): string {
+  return {
+    loading: '加载中',
+    fresh: '数据就绪',
+    stale: '数据延迟',
+    partial: '部分异常',
+    error: '不可用',
+  }[status];
 }
