@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const ZERO_SHA = /^0{40}$/;
 
@@ -41,10 +43,24 @@ function firstRoot(commit) {
   return root;
 }
 
-function resolvePushBase(event, to) {
+function createGitRevisionReader() {
+  return {
+    firstRoot,
+    head: () => git('rev-parse', 'HEAD'),
+    isCommit,
+    mergeBase: (left, right) => git('merge-base', left, right),
+    parent: (commit) => {
+      const parent = `${commit}^`;
+
+      return isCommit(parent) ? git('rev-parse', parent) : undefined;
+    },
+  };
+}
+
+function resolvePushBase(event, to, revisionReader) {
   const before = typeof event.before === 'string' ? event.before : undefined;
 
-  if (isCommit(before)) {
+  if (revisionReader.isCommit(before)) {
     return { from: before, includeFrom: false };
   }
 
@@ -52,45 +68,43 @@ function resolvePushBase(event, to) {
   const pushedRef = typeof event.ref === 'string' ? event.ref.replace(/^refs\/heads\//, '') : '';
   const defaultRef = defaultBranch ? `refs/remotes/origin/${defaultBranch}` : '';
 
-  if (defaultBranch && pushedRef !== defaultBranch && isCommit(defaultRef)) {
-    return { from: git('merge-base', defaultRef, to), includeFrom: false };
+  if (defaultBranch && pushedRef !== defaultBranch && revisionReader.isCommit(defaultRef)) {
+    return { from: revisionReader.mergeBase(defaultRef, to), includeFrom: false };
   }
 
-  return { from: firstRoot(to), includeFrom: true };
+  return { from: revisionReader.firstRoot(to), includeFrom: true };
 }
 
-function resolveRange() {
-  const event = readEvent();
-  const eventName = process.env.GITHUB_EVENT_NAME;
+export function resolveCommitRange({ eventName, event, git: revisionReader }) {
   const requestedTo = eventName === 'pull_request' ? event.pull_request?.head?.sha : event.after;
   const to =
-    typeof requestedTo === 'string' && isCommit(requestedTo)
+    typeof requestedTo === 'string' && revisionReader.isCommit(requestedTo)
       ? requestedTo
-      : git('rev-parse', 'HEAD');
+      : revisionReader.head();
 
   if (eventName === 'pull_request') {
     const base = event.pull_request?.base?.sha;
 
-    if (typeof base !== 'string' || !isCommit(base)) {
+    if (typeof base !== 'string' || !revisionReader.isCommit(base)) {
       throw new Error(
         'The pull request base commit is unavailable. Checkout must fetch full history.',
       );
     }
 
-    return { from: git('merge-base', base, to), to, includeFrom: false };
+    return { from: revisionReader.mergeBase(base, to), to, includeFrom: false };
   }
 
   if (eventName === 'push') {
-    return { ...resolvePushBase(event, to), to };
+    return { ...resolvePushBase(event, to, revisionReader), to };
   }
 
-  const parent = `${to}^`;
+  const parent = revisionReader.parent(to);
 
-  if (isCommit(parent)) {
-    return { from: git('rev-parse', parent), to, includeFrom: false };
+  if (parent) {
+    return { from: parent, to, includeFrom: false };
   }
 
-  return { from: firstRoot(to), to, includeFrom: true };
+  return { from: revisionReader.firstRoot(to), to, includeFrom: true };
 }
 
 function writeOutput(name, value) {
@@ -101,10 +115,22 @@ function writeOutput(name, value) {
   }
 }
 
-const range = resolveRange();
+function main() {
+  const range = resolveCommitRange({
+    eventName: process.env.GITHUB_EVENT_NAME,
+    event: readEvent(),
+    git: createGitRevisionReader(),
+  });
 
-writeOutput('from', range.from);
-writeOutput('to', range.to);
-writeOutput('include-from', String(range.includeFrom));
+  writeOutput('from', range.from);
+  writeOutput('to', range.to);
+  writeOutput('include-from', String(range.includeFrom));
 
-console.log(JSON.stringify(range));
+  console.log(JSON.stringify(range));
+}
+
+const entrypoint = process.argv[1];
+
+if (entrypoint && import.meta.url === pathToFileURL(resolve(entrypoint)).href) {
+  main();
+}
