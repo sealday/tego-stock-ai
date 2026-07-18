@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: '1'
+
+jobs:
+  introduced-commit-policy:
+    name: Introduced commit policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Resolve introduced commits
+        id: commits
+        run: node scripts/resolve-commit-range.mjs
+      - name: Validate introduced commit messages
+        env:
+          FROM: ${{ steps.commits.outputs.from }}
+          TO: ${{ steps.commits.outputs.to }}
+          INCLUDE_FROM: ${{ steps.commits.outputs['include-from'] }}
+        run: |
+          if [ "$FROM" != "$TO" ]; then
+            npx --no -- commitlint --from "$FROM" --to "$TO"
+          fi
+          if [ "$INCLUDE_FROM" = "true" ]; then
+            git show --quiet --format=%B "$FROM" | npx --no -- commitlint
+          fi
+
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+
+  vitest:
+    name: Vitest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run unit, component, and contract tests
+        run: npm run test:unit
+
+  playwright:
+    name: Playwright browser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run browser smoke tests
+        run: npm run test:browser
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
