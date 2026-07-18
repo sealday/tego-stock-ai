@@ -5,6 +5,21 @@ export const CALCULATION_VERSION = '1.0.0' as const;
 export type ScoreBand = 'weak' | 'mixed' | 'constructive' | 'strong';
 export type ScoreStatus = 'complete' | 'partial' | 'insufficient';
 export type ObservationRawValue = number | Readonly<Record<string, number>>;
+export type MissingReason = 'missing' | 'insufficient-reference';
+
+export type MissingInputDetail =
+  | {
+      readonly key: string;
+      readonly label: string;
+      readonly reason: 'missing';
+    }
+  | {
+      readonly key: string;
+      readonly label: string;
+      readonly reason: 'insufficient-reference';
+      readonly availableReferenceCount: number;
+      readonly requiredReferenceCount: number;
+    };
 
 export interface ScoreObservation {
   readonly key: string;
@@ -24,6 +39,7 @@ export interface ExplainableScore {
   readonly status: ScoreStatus;
   readonly observations: readonly ScoreObservation[];
   readonly missingInputs: readonly string[];
+  readonly missingDetails: readonly MissingInputDetail[];
   readonly availableWeight: number;
 }
 
@@ -192,7 +208,7 @@ export function qualitativeBand(score: number): ScoreBand {
 
 function composeScore(
   observations: readonly Omit<ScoreObservation, 'weightedContribution'>[],
-  missingInputs: readonly string[],
+  missingDetails: readonly MissingInputDetail[],
   cutoff: IsoDate,
   expectedObservationCount: number,
   minimumObservationCount: number,
@@ -225,20 +241,25 @@ function composeScore(
           ? 'complete'
           : 'partial',
     observations: explainedObservations,
-    missingInputs,
+    missingInputs: missingDetails.map(({ key }) => key),
+    missingDetails,
     availableWeight,
   };
 }
 
+function missingDetail(key: string, label: string): MissingInputDetail {
+  return { key, label, reason: 'missing' };
+}
+
 export function calculateQualityScore(input: QualityScoreInput, cutoff: IsoDate): ExplainableScore {
   const observations: Omit<ScoreObservation, 'weightedContribution'>[] = [];
-  const missingInputs: string[] = [];
+  const missingDetails: MissingInputDetail[] = [];
 
   for (const definition of QUALITY_DEFINITIONS) {
     const raw = input[definition.key];
     assertOptionalFinite(raw, definition.key);
     if (raw === null || raw === undefined) {
-      missingInputs.push(definition.key);
+      missingDetails.push(missingDetail(definition.key, definition.label));
       continue;
     }
 
@@ -258,35 +279,53 @@ export function calculateQualityScore(input: QualityScoreInput, cutoff: IsoDate)
     });
   }
 
-  return composeScore(observations, missingInputs, cutoff, QUALITY_DEFINITIONS.length, 3);
+  return composeScore(observations, missingDetails, cutoff, QUALITY_DEFINITIONS.length, 3);
 }
 
-function valuationObservation(
+type ValuationEvaluation =
+  | { readonly observation: Omit<ScoreObservation, 'weightedContribution'> }
+  | { readonly missingDetail: MissingInputDetail };
+
+function evaluateValuationFactor(
   key: 'pe' | 'pb' | 'dividendYield',
   label: string,
   input: ValuationFactorInput | null | undefined,
   lowerIsBetter: boolean,
-): Omit<ScoreObservation, 'weightedContribution'> | null {
+): ValuationEvaluation {
   if (input === null || input === undefined) {
-    return null;
+    return { missingDetail: missingDetail(key, label) };
   }
   assertFinite(input.current, `${key} current`);
   for (const referenceValue of input.reference) {
     assertFinite(referenceValue, `${key} reference`);
   }
   if (input.reference.length < 4) {
-    return null;
+    return {
+      missingDetail: {
+        key,
+        label,
+        reason: 'insufficient-reference',
+        availableReferenceCount: input.reference.length,
+        requiredReferenceCount: 4,
+      },
+    };
   }
 
   const percentile = percentileRank(input.current, input.reference);
   const normalized = (lowerIsBetter ? 1 - percentile : percentile) * 100;
   return {
-    key,
-    label,
-    raw: input.current,
-    clipped: input.current,
-    normalized,
-    weight: VALUATION_WEIGHT,
+    observation: {
+      key,
+      label,
+      raw: {
+        current: input.current,
+        percentile,
+        referenceCount: input.reference.length,
+      },
+      clipped: input.current,
+      normalized,
+      weight: VALUATION_WEIGHT,
+    },
   };
 }
 
@@ -295,24 +334,27 @@ export function calculateValuationScore(
   cutoff: IsoDate,
 ): ExplainableScore {
   const candidates = [
-    valuationObservation('pe', 'Price to earnings percentile', input.pe, true),
-    valuationObservation('pb', 'Price to book percentile', input.pb, true),
-    valuationObservation('dividendYield', 'Dividend yield percentile', input.dividendYield, false),
+    evaluateValuationFactor('pe', 'Price to earnings percentile', input.pe, true),
+    evaluateValuationFactor('pb', 'Price to book percentile', input.pb, true),
+    evaluateValuationFactor(
+      'dividendYield',
+      'Dividend yield percentile',
+      input.dividendYield,
+      false,
+    ),
   ] as const;
-  const keys = ['pe', 'pb', 'dividendYield'] as const;
   const observations: Omit<ScoreObservation, 'weightedContribution'>[] = [];
-  const missingInputs: string[] = [];
+  const missingDetails: MissingInputDetail[] = [];
 
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index]!;
-    if (candidate === null) {
-      missingInputs.push(keys[index]!);
+  for (const candidate of candidates) {
+    if ('missingDetail' in candidate) {
+      missingDetails.push(candidate.missingDetail);
     } else {
-      observations.push(candidate);
+      observations.push(candidate.observation);
     }
   }
 
-  return composeScore(observations, missingInputs, cutoff, 3, 2);
+  return composeScore(observations, missingDetails, cutoff, 3, 2);
 }
 
 function available(value: number | null | undefined): value is number {
@@ -349,9 +391,12 @@ export function calculateTrendScore(input: TrendScoreInput, cutoff: IsoDate): Ex
   for (const [name, value] of providedValues) {
     assertOptionalFinite(value, name);
   }
+  if (available(input.volumeRatio20) && input.volumeRatio20 < 0) {
+    throw new RangeError('volumeRatio20 must be non-negative');
+  }
 
   const observations: Omit<ScoreObservation, 'weightedContribution'>[] = [];
-  const missingInputs: string[] = [];
+  const missingDetails: MissingInputDetail[] = [];
 
   if (available(input.close) && available(input.ma20) && available(input.ma60)) {
     const points =
@@ -370,7 +415,7 @@ export function calculateTrendScore(input: TrendScoreInput, cutoff: IsoDate): Ex
       ),
     );
   } else {
-    missingInputs.push('maAlignment');
+    missingDetails.push(missingDetail('maAlignment', 'Moving-average alignment'));
   }
 
   if (available(input.ma20) && available(input.previousMa20)) {
@@ -384,7 +429,7 @@ export function calculateTrendScore(input: TrendScoreInput, cutoff: IsoDate): Ex
       ),
     );
   } else {
-    missingInputs.push('ma20Slope');
+    missingDetails.push(missingDetail('ma20Slope', '20-day moving-average slope'));
   }
 
   if (available(input.macdHistogram)) {
@@ -398,7 +443,7 @@ export function calculateTrendScore(input: TrendScoreInput, cutoff: IsoDate): Ex
       ),
     );
   } else {
-    missingInputs.push('macdHistogram');
+    missingDetails.push(missingDetail('macdHistogram', 'MACD histogram direction'));
   }
 
   if (
@@ -425,8 +470,8 @@ export function calculateTrendScore(input: TrendScoreInput, cutoff: IsoDate): Ex
       ),
     );
   } else {
-    missingInputs.push('volumeConfirmation');
+    missingDetails.push(missingDetail('volumeConfirmation', 'Volume and direction confirmation'));
   }
 
-  return composeScore(observations, missingInputs, cutoff, 4, 1);
+  return composeScore(observations, missingDetails, cutoff, 4, 1);
 }

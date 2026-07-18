@@ -67,6 +67,15 @@ function assertPositiveSeries(values: readonly number[], name: string): void {
   }
 }
 
+function assertNonNegativeSeries(values: readonly number[], name: string): void {
+  assertFiniteSeries(values, name);
+  for (const value of values) {
+    if (value < 0) {
+      throw new RangeError(`${name} must contain only non-negative values`);
+    }
+  }
+}
+
 export function simpleMovingAverage(values: readonly number[], period: number): NullableSeries {
   assertPeriod(period);
   assertFiniteSeries(values, 'Values');
@@ -251,7 +260,7 @@ export function classifyVolumeRatio(ratio: number): VolumeBand {
 
 export function volumeRatio(values: readonly number[], period = 20): VolumeRatioSeries {
   assertPeriod(period);
-  assertFiniteSeries(values, 'Volumes');
+  assertNonNegativeSeries(values, 'Volumes');
 
   const averages = simpleMovingAverage(values, period);
   const ratios: (number | null)[] = Array.from({ length: values.length }, () => null);

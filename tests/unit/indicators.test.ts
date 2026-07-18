@@ -113,6 +113,23 @@ describe('indicator engine', () => {
     ).toBe(100);
   });
 
+  it('locks seeded MACD and Wilder RSI against a non-linear close sequence', () => {
+    const closes = [
+      100, 102, 101, 105, 103, 107, 106, 108, 104, 109, 111, 110, 115, 113, 117, 116, 118, 121, 119,
+      123, 122, 126, 124, 128, 127, 130, 129, 133, 131, 135, 134, 138, 136, 140, 139,
+    ];
+
+    const macdResult = macd(closes);
+    const rsiResult = relativeStrengthIndex(closes, 14);
+
+    expect(macdResult.signal[33]).toBeCloseTo(8.475193159231099, 10);
+    expect(macdResult.histogram[33]).toBeCloseTo(0.04064353401598275, 10);
+    expect(macdResult.signal[34]).toBeCloseTo(8.46553484047331, 10);
+    expect(macdResult.histogram[34]).toBeCloseTo(-0.03863327503115954, 10);
+    expect(rsiResult[14]).toBeCloseTo(71.7948717948718, 10);
+    expect(rsiResult[15]).toBeCloseTo(69.86564299424185, 10);
+  });
+
   it('classifies volume ratios at their inclusive band boundaries', () => {
     const result = volumeRatio(
       [...Array.from({ length: 19 }, () => 100), 120, ...Array.from({ length: 19 }, () => 100), 80],
@@ -123,6 +140,17 @@ describe('indicator engine', () => {
     expect(result.bands[19]).toBe('normal');
     expect(classifyVolumeRatio(1.2)).toBe('expanding');
     expect(classifyVolumeRatio(0.8)).toBe('contracting');
+  });
+
+  it('rejects negative volume while keeping an all-zero window unavailable', () => {
+    expect(() => volumeRatio([-100, -100], 2)).toThrow(RangeError);
+
+    const result = volumeRatio(
+      Array.from({ length: 20 }, () => 0),
+      20,
+    );
+    expect(last(result.values)).toBeNull();
+    expect(last(result.bands)).toBeNull();
   });
 
   it('tracks running peaks and the minimum drawdown without changing input order', () => {

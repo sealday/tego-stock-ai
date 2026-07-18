@@ -33,6 +33,7 @@ describe('score engine', () => {
       status: 'complete',
       availableWeight: 100,
       missingInputs: [],
+      missingDetails: [],
     });
     expect(
       result.observations.map(({ key, label, raw, clipped, weight }) => ({
@@ -111,6 +112,11 @@ describe('score engine', () => {
       status: 'partial',
       availableWeight: 55,
       missingInputs: ['grossMargin', 'revenueGrowth', 'profitGrowth'],
+      missingDetails: [
+        { key: 'grossMargin', label: 'Gross margin', reason: 'missing' },
+        { key: 'revenueGrowth', label: 'Revenue growth', reason: 'missing' },
+        { key: 'profitGrowth', label: 'Profit growth', reason: 'missing' },
+      ],
     });
     for (const [index, expectedContribution] of [25 / 0.55, 20 / 0.55, 10 / 0.55].entries()) {
       expect(result.observations[index]!.weightedContribution).toBeCloseTo(
@@ -188,6 +194,12 @@ describe('score engine', () => {
       expect(observation.normalized).toBe(62.5);
       expect(observation.weightedContribution).toBeCloseTo(62.5 / 3, 10);
     }
+    expect(result.observations.map(({ raw }) => raw)).toEqual([
+      { current: 15, percentile: 0.375, referenceCount: 4 },
+      { current: 2, percentile: 0.375, referenceCount: 4 },
+      { current: 0.03, percentile: 0.625, referenceCount: 4 },
+    ]);
+    expect(result.observations.map(({ clipped }) => clipped)).toEqual([15, 2, 0.03]);
   });
 
   it('requires four references per valuation factor and at least two usable factors', () => {
@@ -205,6 +217,20 @@ describe('score engine', () => {
       status: 'insufficient',
       availableWeight: 100 / 3,
       missingInputs: ['pe', 'dividendYield'],
+      missingDetails: [
+        {
+          key: 'pe',
+          label: 'Price to earnings percentile',
+          reason: 'insufficient-reference',
+          availableReferenceCount: 3,
+          requiredReferenceCount: 4,
+        },
+        {
+          key: 'dividendYield',
+          label: 'Dividend yield percentile',
+          reason: 'missing',
+        },
+      ],
     });
   });
 
@@ -228,6 +254,15 @@ describe('score engine', () => {
       status: 'partial',
       availableWeight: 40,
       missingInputs: ['ma20Slope', 'macdHistogram', 'volumeConfirmation'],
+      missingDetails: [
+        { key: 'ma20Slope', label: '20-day moving-average slope', reason: 'missing' },
+        { key: 'macdHistogram', label: 'MACD histogram direction', reason: 'missing' },
+        {
+          key: 'volumeConfirmation',
+          label: 'Volume and direction confirmation',
+          reason: 'missing',
+        },
+      ],
     });
     expect(result.observations).toEqual([
       {
@@ -286,6 +321,30 @@ describe('score engine', () => {
     ).toLowerCase();
     expect(serialized).not.toContain('buy');
     expect(serialized).not.toContain('sell');
+  });
+
+  it('rejects a negative trend volume ratio but treats zero as an available observation', () => {
+    const base = {
+      close: 80,
+      ma20: 70.5,
+      ma60: 50.5,
+      previousMa20: 70,
+      macdHistogram: 2,
+      dailyReturn: 0.01,
+    } as const;
+
+    expect(() => calculateTrendScore({ ...base, volumeRatio20: -0.1 }, CUTOFF)).toThrow(RangeError);
+
+    const zeroVolume = calculateTrendScore({ ...base, volumeRatio20: 0 }, CUTOFF);
+    expect(zeroVolume.observations.at(-1)).toEqual({
+      key: 'volumeConfirmation',
+      label: 'Volume and direction confirmation',
+      raw: { volumeRatio20: 0, dailyReturn: 0.01, ma20: 70.5, previousMa20: 70 },
+      clipped: 0,
+      normalized: 0,
+      weight: 20,
+      weightedContribution: 0,
+    });
   });
 
   it.each([
