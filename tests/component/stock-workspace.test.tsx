@@ -242,6 +242,32 @@ describe('StockWorkspace', () => {
     expect(screen.queryByText('缺失：未提供')).toBeNull();
   });
 
+  it('preserves weighted contribution values that are already expressed as 0–100 points', () => {
+    const state = readyState();
+    const observation = state.analysis.trend.observations[0];
+    if (observation === undefined) {
+      throw new Error('Expected a trend observation fixture');
+    }
+
+    render(
+      <StockWorkspace
+        state={{
+          ...state,
+          analysis: {
+            ...state.analysis,
+            trend: {
+              ...state.analysis.trend,
+              observations: [{ ...observation, weightedContribution: 40 }],
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/加权贡献：40\.0 分/)).toBeVisible();
+    expect(screen.queryByText(/加权贡献：4000\.0 分/)).toBeNull();
+  });
+
   it('discloses missing, stale, and endpoint-error states while preserving usable panels', () => {
     render(
       <StockWorkspace

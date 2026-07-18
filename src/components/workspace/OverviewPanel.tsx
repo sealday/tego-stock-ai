@@ -139,7 +139,7 @@ function ScoreCard({ label, score }: { readonly label: string; readonly score: E
                 加权贡献：
                 {observation.weightedContribution === null
                   ? '不可计算'
-                  : `${(observation.weightedContribution * 100).toFixed(1)} 分`}
+                  : `${observation.weightedContribution.toFixed(1)} 分`}
               </span>
             </li>
           ))}
