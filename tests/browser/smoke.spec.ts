@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 
 const responsiveCases = [
-  { name: 'compact', width: 390, height: 844 },
+  { name: 'mobile', width: 375, height: 812 },
+  { name: 'tablet', width: 768, height: 1024 },
+  { name: 'compact-desktop', width: 1024, height: 900 },
   { name: 'desktop', width: 1440, height: 1000 },
 ] as const;
 

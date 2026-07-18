@@ -18,6 +18,7 @@ interface PackageLock {
 
 const approvedDependencies = {
   '@vercel/blob': '2.6.1',
+  'lightweight-charts': '5.2.0',
   react: '19.2.7',
   'react-dom': '19.2.7',
   zod: '4.4.3',

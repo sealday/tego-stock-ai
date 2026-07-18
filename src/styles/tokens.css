@@ -1,20 +1,28 @@
 :root {
   color-scheme: dark;
-  --color-canvas: #050b18;
-  --color-surface: #0b1426;
-  --color-surface-raised: #111e35;
-  --color-border: #263a5c;
-  --color-text: #e7eefb;
-  --color-text-muted: #9caec9;
-  --color-accent: #62a7ff;
-  --color-accent-strong: #8fc1ff;
-  --color-market-up: #d76875;
-  --color-market-down: #4ebc90;
-  --color-focus: #a9d0ff;
-  --shadow-panel: 0 1.5rem 4rem rgb(0 0 0 / 28%);
-  --radius-panel: 0.75rem;
-  --space-page: clamp(1rem, 4vw, 3rem);
-  --font-sans:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --color-canvas: #050a13;
+  --color-surface: #081323;
+  --color-surface-subtle: #0c192b;
+  --color-surface-raised: #102038;
+  --color-border: #263d5d;
+  --color-border-strong: #385779;
+  --color-text: #e8f0fb;
+  --color-text-muted: #9cadc5;
+  --color-text-faint: #70839f;
+  --color-accent: #68a8ff;
+  --color-accent-strong: #9ac7ff;
+  --color-accent-soft: rgb(104 168 255 / 12%);
+  --color-market-up: #df6474;
+  --color-market-up-soft: rgb(223 100 116 / 12%);
+  --color-market-down: #45b987;
+  --color-market-down-soft: rgb(69 185 135 / 12%);
+  --color-warning: #f2ba66;
+  --color-warning-soft: rgb(242 186 102 / 12%);
+  --color-error: #ff8291;
+  --color-focus: #b9d8ff;
+  --shadow-panel: 0 1.25rem 3rem rgb(0 0 0 / 24%);
+  --radius-panel: 0.625rem;
+  --radius-control: 0.375rem;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 }
