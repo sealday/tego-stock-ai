@@ -66,7 +66,7 @@ describe('TypeScript project boundaries', () => {
     expect(serverConfig.compilerOptions?.lib).not.toContain('DOM.Iterable');
   });
 
-  it('keeps browser and shared source imports out of the server implementation', () => {
+  it('prevents browser and shared source from importing server implementation modules', () => {
     const violations = listTypeScriptFiles(join(projectRoot, 'src')).flatMap((filePath) => {
       const source = readFileSync(filePath, 'utf8');
       const serverImport = importedModules(source).find((moduleName) =>
