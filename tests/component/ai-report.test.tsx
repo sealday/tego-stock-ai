@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { AiStreamEvent } from '../../src/ai/client';
+import { MAX_AI_REPORT_TEXT_BYTES, type AiStreamEvent } from '../../src/ai/client';
 import { REPORT_SECTION_HEADINGS, type ReportContext } from '../../src/ai/report-contract';
 import {
   AiReportPanel,
@@ -571,6 +571,49 @@ describe('AiReportPanel', () => {
       status: 'draft',
       reason: 'stream-interrupted',
     });
+  });
+
+  it('bounds report text even when an injected streamer emits an oversized delta', async () => {
+    const user = userEvent.setup();
+    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    const retainedText = '## 数据摘要与截止日期\n安全保留的草稿。';
+    let requestAborted = false;
+    const stream: AiReportStreamer = async function* (configuration) {
+      try {
+        yield { type: 'delta', text: retainedText };
+        yield {
+          type: 'delta',
+          text: '限'.repeat(Math.floor(MAX_AI_REPORT_TEXT_BYTES / 3) + 1),
+        };
+        yield { type: 'complete' };
+      } finally {
+        requestAborted = configuration.signal.aborted;
+      }
+    };
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onSaveReport={onSaveReport}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+    expect(await screen.findByText('未完成草稿 · 流式响应中断')).toBeVisible();
+    expect(screen.getByRole('alert').textContent).toBe('AI 响应超过安全大小限制。');
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    const draft = onDraftReport.mock.calls[0]?.[0];
+    expect(draft?.rawText).toBe(retainedText);
+    expect(new TextEncoder().encode(draft?.rawText).byteLength).toBeLessThanOrEqual(
+      MAX_AI_REPORT_TEXT_BYTES,
+    );
+    expect(JSON.stringify(draft?.sections)).not.toContain('限'.repeat(100));
+    expect(onSaveReport).not.toHaveBeenCalled();
+    await waitFor(() => expect(requestAborted).toBe(true));
   });
 
   it.each([

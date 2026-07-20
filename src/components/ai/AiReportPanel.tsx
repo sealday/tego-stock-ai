@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import {
+  MAX_AI_REPORT_TEXT_BYTES,
   createAiClient,
   type AiChatMessage,
   type AiClientConfiguration,
@@ -56,6 +57,7 @@ const browserReportStreamer: AiReportStreamer = (configuration, messages) =>
 
 const currentTime = () => new Date();
 const CONTRACT_INVALID_MESSAGE = 'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。';
+const REPORT_SIZE_LIMIT_MESSAGE = 'AI 响应超过安全大小限制。';
 
 export function AiReportPanel({
   context,
@@ -293,6 +295,7 @@ interface GenerationCallbacks {
 
 async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
   let aggregate = '';
+  let aggregateBytes = 0;
   let terminalEvent = false;
   const parser = createIncrementalReportParser();
 
@@ -313,6 +316,31 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
         return;
       }
       if (event.type === 'delta') {
+        const nextBytes = utf8ByteLength(event.text);
+        if (aggregateBytes + nextBytes > MAX_AI_REPORT_TEXT_BYTES) {
+          callbacks.controller.abort();
+          const parsed = parser.finish();
+          if (aggregate.length === 0) {
+            callbacks.onError(REPORT_SIZE_LIMIT_MESSAGE);
+          } else if (isInterruptedContractViolation(parsed)) {
+            deliverContractInvalidDraft(callbacks, aggregate, parsed);
+          } else {
+            callbacks.onDraft(
+              createDraftReport({
+                context: callbacks.context,
+                settings: callbacks.settings,
+                rawText: aggregate,
+                sections: parsed.sections,
+                reason: 'stream-interrupted',
+                errorMessage: REPORT_SIZE_LIMIT_MESSAGE,
+                now: callbacks.now,
+              }),
+              '流式响应中断',
+            );
+          }
+          return;
+        }
+        aggregateBytes += nextBytes;
         aggregate += event.text;
         const parsed = parser.push(event.text);
         callbacks.onDelta(aggregate, parsed.sections);
@@ -463,6 +491,10 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
   } finally {
     callbacks.onFinished();
   }
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function isInterruptedContractViolation(

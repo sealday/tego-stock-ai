@@ -437,6 +437,7 @@ describe('report context contract', () => {
       { score: 78.2, band: 'constructive', status: 'insufficient' },
     ],
     ['complete score with missing inputs', { status: 'complete', missingInputs: ['ma60'] }],
+    ['partial score without missing inputs', { status: 'partial', missingInputs: [] }],
     [
       'insufficient score without missing inputs',
       { score: null, band: null, status: 'insufficient', missingInputs: [] },

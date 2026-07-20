@@ -51,10 +51,10 @@ const scoreSignalSchema = z
         path: ['missingInputs'],
       });
     }
-    if (signal.status === 'insufficient' && signal.missingInputs.length === 0) {
+    if (signal.status !== 'complete' && signal.missingInputs.length === 0) {
       context.addIssue({
         code: 'custom',
-        message: 'An insufficient score must declare missing inputs',
+        message: 'A partial or insufficient score must declare missing inputs',
         path: ['missingInputs'],
       });
     }

@@ -52,6 +52,12 @@ export const MAX_AI_SSE_BYTES = 2 * 1024 * 1024;
 export const MAX_AI_SSE_FRAME_BYTES = 256 * 1024;
 // Bound report text retained by the UI and eligible for local draft persistence.
 export const MAX_AI_REPORT_TEXT_BYTES = 512 * 1024;
+// Flush accumulated UI text before it becomes expensive to retain or reconcile.
+export const AI_DELTA_FLUSH_BYTES = 16 * 1024;
+// Bound render frequency even when a provider emits one tiny SSE frame per network read.
+export const AI_DELTA_FLUSH_FRAMES = 128;
+// Keep subsequent streamed text perceptibly live when byte and frame thresholds are not reached.
+export const AI_DELTA_FLUSH_INTERVAL_MS = 50;
 
 export function buildChatCompletionsUrl(
   baseUrl: string,
@@ -142,6 +148,7 @@ async function* streamChatCompletion(
   }
 
   if (!response.ok) {
+    await cancelBodySafely(response.body);
     yield response.status === 401 || response.status === 403
       ? { type: 'error', code: 'authentication', message: SAFE_AUTHENTICATION_ERROR }
       : { type: 'error', code: 'provider', message: SAFE_PROVIDER_ERROR };
@@ -169,6 +176,35 @@ async function* streamChatCompletion(
   let reachedDone = false;
   let rawBytes = 0;
   let reportBytes = 0;
+  let pendingDelta = '';
+  let pendingDeltaBytes = 0;
+  let pendingDeltaFrames = 0;
+  let emittedFirstDelta = false;
+  let lastDeltaFlushAt = Date.now();
+  let outstandingRead: Promise<ReadableStreamReadResult<Uint8Array>> | undefined;
+  const takePendingDelta = (): AiStreamEvent | undefined => {
+    if (pendingDelta.length === 0) {
+      return undefined;
+    }
+    const event: AiStreamEvent = { type: 'delta', text: pendingDelta };
+    pendingDelta = '';
+    pendingDeltaBytes = 0;
+    pendingDeltaFrames = 0;
+    emittedFirstDelta = true;
+    lastDeltaFlushAt = Date.now();
+    return event;
+  };
+  const appendDelta = (text: string, bytes: number): AiStreamEvent | undefined => {
+    pendingDelta += text;
+    pendingDeltaBytes += bytes;
+    pendingDeltaFrames += 1;
+    const shouldFlush =
+      !emittedFirstDelta ||
+      pendingDeltaBytes >= AI_DELTA_FLUSH_BYTES ||
+      pendingDeltaFrames >= AI_DELTA_FLUSH_FRAMES ||
+      Date.now() - lastDeltaFlushAt >= AI_DELTA_FLUSH_INTERVAL_MS;
+    return shouldFlush ? takePendingDelta() : undefined;
+  };
   const cancelReader = () => {
     void cancelReaderSafely(reader);
   };
@@ -177,14 +213,48 @@ async function* streamChatCompletion(
   try {
     while (!reachedDone) {
       if (configuration.signal.aborted) {
+        const pendingEvent = takePendingDelta();
+        if (pendingEvent !== undefined) {
+          yield pendingEvent;
+        }
         yield { type: 'aborted' };
         return;
       }
 
       let result: ReadableStreamReadResult<Uint8Array>;
       try {
-        result = await reader.read();
+        outstandingRead ??= reader.read();
+        if (pendingDelta.length > 0 && emittedFirstDelta) {
+          const remainingDelay = Math.max(
+            0,
+            AI_DELTA_FLUSH_INTERVAL_MS - (Date.now() - lastDeltaFlushAt),
+          );
+          if (remainingDelay === 0) {
+            const pendingEvent = takePendingDelta();
+            if (pendingEvent !== undefined) {
+              yield pendingEvent;
+            }
+            continue;
+          }
+          const outcome = await readUntilFlushDeadline(outstandingRead, remainingDelay);
+          if (outcome.type === 'flush') {
+            const pendingEvent = takePendingDelta();
+            if (pendingEvent !== undefined) {
+              yield pendingEvent;
+            }
+            continue;
+          }
+          result = outcome.result;
+        } else {
+          result = await outstandingRead;
+        }
+        outstandingRead = undefined;
       } catch {
+        outstandingRead = undefined;
+        const pendingEvent = takePendingDelta();
+        if (pendingEvent !== undefined) {
+          yield pendingEvent;
+        }
         yield configuration.signal.aborted
           ? { type: 'aborted' }
           : { type: 'error', code: 'network', message: SAFE_NETWORK_ERROR };
@@ -197,6 +267,10 @@ async function* streamChatCompletion(
       }
       rawBytes += result.value.byteLength;
       if (rawBytes > MAX_AI_SSE_BYTES) {
+        const pendingEvent = takePendingDelta();
+        if (pendingEvent !== undefined) {
+          yield pendingEvent;
+        }
         yield sizeLimitError();
         return;
       }
@@ -205,10 +279,14 @@ async function* streamChatCompletion(
       const extracted = extractFrames(buffer);
       buffer = extracted.remaining;
       if (utf8ByteLength(buffer) > MAX_AI_SSE_FRAME_BYTES) {
+        const pendingEvent = takePendingDelta();
+        if (pendingEvent !== undefined) {
+          yield pendingEvent;
+        }
         yield sizeLimitError();
         return;
       }
-      let batchText = '';
+      const readyDeltas: AiStreamEvent[] = [];
       let terminalEvent: AiStreamEvent | undefined;
       for (const frame of extracted.frames) {
         if (utf8ByteLength(frame) > MAX_AI_SSE_FRAME_BYTES) {
@@ -230,7 +308,10 @@ async function* streamChatCompletion(
             break;
           }
           reportBytes += nextBytes;
-          batchText += parsed.event.text;
+          const readyDelta = appendDelta(parsed.event.text, nextBytes);
+          if (readyDelta !== undefined) {
+            readyDeltas.push(readyDelta);
+          }
           continue;
         }
         if (parsed.event.type === 'error') {
@@ -238,8 +319,14 @@ async function* streamChatCompletion(
           break;
         }
       }
-      if (batchText.length > 0) {
-        yield { type: 'delta', text: batchText };
+      if (terminalEvent !== undefined || reachedDone) {
+        const pendingEvent = takePendingDelta();
+        if (pendingEvent !== undefined) {
+          readyDeltas.push(pendingEvent);
+        }
+      }
+      for (const event of readyDeltas) {
+        yield event;
       }
       if (terminalEvent !== undefined) {
         yield terminalEvent;
@@ -249,6 +336,10 @@ async function* streamChatCompletion(
 
     if (!reachedDone && buffer.trim().length > 0) {
       if (utf8ByteLength(buffer) > MAX_AI_SSE_FRAME_BYTES) {
+        const pendingEvent = takePendingDelta();
+        if (pendingEvent !== undefined) {
+          yield pendingEvent;
+        }
         yield sizeLimitError();
         return;
       }
@@ -259,16 +350,32 @@ async function* streamChatCompletion(
         if (parsed.event.type === 'delta') {
           const nextBytes = utf8ByteLength(parsed.event.text);
           if (reportBytes + nextBytes > MAX_AI_REPORT_TEXT_BYTES) {
+            const pendingEvent = takePendingDelta();
+            if (pendingEvent !== undefined) {
+              yield pendingEvent;
+            }
             yield sizeLimitError();
             return;
           }
           reportBytes += nextBytes;
-        }
-        yield parsed.event;
-        if (parsed.event.type === 'error') {
+          const readyDelta = appendDelta(parsed.event.text, nextBytes);
+          if (readyDelta !== undefined) {
+            yield readyDelta;
+          }
+        } else {
+          const pendingEvent = takePendingDelta();
+          if (pendingEvent !== undefined) {
+            yield pendingEvent;
+          }
+          yield parsed.event;
           return;
         }
       }
+    }
+
+    const pendingEvent = takePendingDelta();
+    if (pendingEvent !== undefined) {
+      yield pendingEvent;
     }
 
     if (configuration.signal.aborted) {
@@ -412,6 +519,39 @@ async function cancelReaderSafely(reader: ReadableStreamDefaultReader<Uint8Array
   } catch {
     // Cancellation is cleanup only; provider details must never escape through this path.
   }
+}
+
+type ReadDeadlineOutcome =
+  | { readonly type: 'read'; readonly result: ReadableStreamReadResult<Uint8Array> }
+  | { readonly type: 'flush' };
+
+function readUntilFlushDeadline(
+  read: Promise<ReadableStreamReadResult<Uint8Array>>,
+  delayMilliseconds: number,
+): Promise<ReadDeadlineOutcome> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      resolve({ type: 'flush' });
+    }, delayMilliseconds);
+    void read.then(
+      (result) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ type: 'read', result });
+        }
+      },
+      (error: unknown) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      },
+    );
+  });
 }
 
 function runtimeApplicationOrigin(): string | undefined {

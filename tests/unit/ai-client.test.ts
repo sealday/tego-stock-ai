@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  AI_DELTA_FLUSH_BYTES,
+  AI_DELTA_FLUSH_FRAMES,
+  AI_DELTA_FLUSH_INTERVAL_MS,
   MAX_AI_REPORT_TEXT_BYTES,
   MAX_AI_SSE_BYTES,
   MAX_AI_SSE_FRAME_BYTES,
@@ -138,6 +141,71 @@ describe('OpenAI-compatible browser client', () => {
     expect(textSpy).not.toHaveBeenCalled();
     expect(JSON.stringify(events)).not.toContain('sk-browser-secret');
     expect(JSON.stringify(events)).not.toContain('upstream body');
+  });
+
+  it('cancels an open non-2xx response body before mapping the safe error', async () => {
+    const cancel = vi.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('upstream body with secret'));
+        },
+        cancel,
+      }),
+      { status: 500 },
+    );
+
+    const events = await collect(
+      createAiClient(
+        {
+          baseUrl: 'https://provider.example/v1',
+          model: 'research-model',
+          apiKey: 'sk-browser-secret',
+          signal: new AbortController().signal,
+        },
+        async () => response,
+      ),
+    );
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      { type: 'error', code: 'provider', message: 'AI 服务返回错误，请检查提供商设置。' },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/secret|upstream body/);
+  });
+
+  it('swallows non-2xx response body cancellation rejection', async () => {
+    const cancel = vi.fn(async () => Promise.reject(new Error('cancel leaked secret')));
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('provider error body'));
+        },
+        cancel,
+      }),
+      { status: 403 },
+    );
+
+    await expect(
+      collect(
+        createAiClient(
+          {
+            baseUrl: 'https://provider.example/v1',
+            model: 'research-model',
+            apiKey: 'sk-browser-secret',
+            signal: new AbortController().signal,
+          },
+          async () => response,
+        ),
+      ),
+    ).resolves.toEqual([
+      {
+        type: 'error',
+        code: 'authentication',
+        message: 'AI 提供商拒绝了凭据，请检查 API key。',
+      },
+    ]);
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -436,6 +504,9 @@ describe('OpenAI-compatible browser client', () => {
     expect(MAX_AI_SSE_BYTES).toBe(2 * 1024 * 1024);
     expect(MAX_AI_SSE_FRAME_BYTES).toBe(256 * 1024);
     expect(MAX_AI_REPORT_TEXT_BYTES).toBe(512 * 1024);
+    expect(AI_DELTA_FLUSH_BYTES).toBe(16 * 1024);
+    expect(AI_DELTA_FLUSH_FRAMES).toBe(128);
+    expect(AI_DELTA_FLUSH_INTERVAL_MS).toBe(50);
   });
 
   it.each([
@@ -486,7 +557,7 @@ describe('OpenAI-compatible browser client', () => {
     }
   });
 
-  it('merges all deltas parsed from one reader batch into one UI update', async () => {
+  it('bounds delta events parsed from one reader batch', async () => {
     const frames = Array.from(
       { length: 1_000 },
       () => 'data: {"choices":[{"delta":{"content":"字"}}]}\n\n',
@@ -503,8 +574,87 @@ describe('OpenAI-compatible browser client', () => {
       ),
     );
 
-    expect(events).toEqual([{ type: 'delta', text: '字'.repeat(1_000) }, { type: 'complete' }]);
+    const deltas = events.filter(
+      (event): event is Extract<AiStreamEvent, { readonly type: 'delta' }> =>
+        event.type === 'delta',
+    );
+    expect(deltas.length).toBeLessThanOrEqual(10);
+    expect(deltas.map((event) => event.text).join('')).toBe('字'.repeat(1_000));
+    expect(events.at(-1)).toEqual({ type: 'complete' });
   });
+
+  it('batches tiny deltas across independent reader reads with bounded event count', async () => {
+    const encoder = new TextEncoder();
+    const frameCount = 1_025;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let index = 0; index < frameCount; index += 1) {
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":"字"}}]}\n\n'),
+            );
+          }
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+
+    const events = await collect(
+      createAiClient(
+        {
+          baseUrl: 'https://provider.example/v1',
+          model: 'research-model',
+          apiKey: 'secret',
+          signal: new AbortController().signal,
+        },
+        async () => response,
+      ),
+    );
+    const deltas = events.filter(
+      (event): event is Extract<AiStreamEvent, { readonly type: 'delta' }> =>
+        event.type === 'delta',
+    );
+
+    expect(deltas.length).toBeLessThanOrEqual(10);
+    expect(deltas.map((event) => event.text).join('')).toBe('字'.repeat(frameCount));
+    expect(events.at(-1)).toEqual({ type: 'complete' });
+  });
+
+  it.each([
+    ['DONE', ['data: [DONE]\n\n'], { type: 'complete' }],
+    [
+      'provider error',
+      ['data: {"error":{"message":"private provider detail"}}\n\n'],
+      { type: 'error', code: 'provider', message: 'AI 服务返回错误，请检查提供商设置。' },
+    ],
+    ['EOF', [], { type: 'error', code: 'invalid-response', message: 'AI 响应流意外中断。' }],
+  ] as const)(
+    'flushes a pending cross-read delta before %s',
+    async (_name, terminalChunks, terminal) => {
+      const first = 'data: {"choices":[{"delta":{"content":"first"}}]}\n\n';
+      const second = 'data: {"choices":[{"delta":{"content":"second"}}]}\n\n';
+      const events = await collect(
+        createAiClient(
+          {
+            baseUrl: 'https://provider.example/v1',
+            model: 'research-model',
+            apiKey: 'secret',
+            signal: new AbortController().signal,
+          },
+          async () => streamResponse([first, second, ...terminalChunks]),
+        ),
+      );
+      const deltas = events.filter(
+        (event): event is Extract<AiStreamEvent, { readonly type: 'delta' }> =>
+          event.type === 'delta',
+      );
+
+      expect(deltas.map((event) => event.text).join('')).toBe('firstsecond');
+      expect(deltas).toHaveLength(2);
+      expect(events.at(-1)).toEqual(terminal);
+    },
+  );
 
   it('cancels an open reader after [DONE] and does not wait for another chunk', async () => {
     const cancel = vi.fn();
