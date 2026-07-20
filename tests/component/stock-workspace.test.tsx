@@ -1,4 +1,4 @@
-import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { createChart } from 'lightweight-charts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -257,7 +257,7 @@ describe('StockWorkspace', () => {
     expect(screen.getByText('财务质量')).toBeVisible();
     expect(screen.getByText('估值位置')).toBeVisible();
     expect(screen.getByRole('heading', { name: '主要价格图' })).toBeVisible();
-    expect(screen.getByText(/Copyright \(c\) 2025 TradingView/)).toBeVisible();
+    expect(screen.getByText(/Copyright \(с\) 2025 TradingView/)).toBeVisible();
     expect(screen.getByText('Moving-average alignment')).toBeVisible();
     expect(screen.getAllByText(/加权贡献/).length).toBeGreaterThan(0);
     expect(screen.getByText('Price to earnings percentile')).toBeVisible();
@@ -274,6 +274,19 @@ describe('StockWorkspace', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
     expect(screen.getByText(/Task 6 将提供/)).toBeVisible();
     expect(screen.queryByRole('button', { name: /生成/ })).toBeNull();
+  });
+
+  it('keeps every tab control attached to a persistent hidden or visible tabpanel', () => {
+    render(<StockWorkspace state={readyState()} />);
+
+    for (const tab of screen.getAllByRole('tab')) {
+      const panelId = tab.getAttribute('aria-controls');
+      const panel = document.getElementById(panelId ?? '');
+      expect(panel).not.toBeNull();
+      expect(panel?.getAttribute('role')).toBe('tabpanel');
+      expect(panel?.getAttribute('aria-labelledby')).toBe(tab.id);
+      expect((panel as HTMLElement).hidden).toBe(tab.getAttribute('aria-selected') !== 'true');
+    }
   });
 
   it('renders a fully fresh fixture with available metrics, score evidence, and limitations', () => {
@@ -377,9 +390,102 @@ describe('StockWorkspace', () => {
     render(<StockWorkspace state={readyState()} />);
 
     const attribution = screen.getByRole('link', {
-      name: 'Copyright (c) 2025 TradingView, Inc. https://www.tradingview.com/',
+      name: 'TradingView Lightweight Charts™ Copyright (с) 2025 TradingView, Inc. https://www.tradingview.com/',
     });
     expect(attribution.getAttribute('href')).toBe('https://www.tradingview.com/');
+  });
+
+  it('associates the chart overlay label and announces the selected overlay', () => {
+    render(<StockWorkspace state={readyState()} />);
+
+    const selector = screen.getByRole('combobox', { name: '叠加指标' });
+    const label = screen.getByText('叠加指标', { selector: 'label' });
+    expect(selector.id).not.toBe('chart-overlay');
+    expect(label.getAttribute('for')).toBe(selector.id);
+    expect(screen.getByText(/当前叠加指标：MA5、MA20、MA60/)).toBeVisible();
+
+    fireEvent.change(selector, { target: { value: 'bollinger' } });
+    expect(screen.getByText(/当前叠加指标：布林带、MA5、MA20、MA60/)).toBeVisible();
+  });
+
+  it.each([
+    { overview: { status: 'loading' } as const },
+    { overview: { status: 'error', message: 'safe' } as const },
+    {
+      history: { status: 'success', envelope: envelope([]) } as const,
+      analysis: createWorkspaceAnalysis({
+        history: envelope([]),
+        overview: null,
+        fundamentals: null,
+      }),
+    },
+  ])('keeps the required attribution visible when chart data is unavailable', (overrides) => {
+    render(<StockWorkspace state={readyState(overrides)} />);
+
+    expect(
+      screen.getByRole('link', {
+        name: 'TradingView Lightweight Charts™ Copyright (с) 2025 TradingView, Inc. https://www.tradingview.com/',
+      }),
+    ).toBeVisible();
+  });
+
+  it('shows each score cutoff at the exact source date', () => {
+    const state = readyState();
+    const analysis = {
+      ...state.analysis,
+      trend:
+        state.analysis.trend === null
+          ? null
+          : { ...state.analysis.trend, cutoff: isoDate('2026-07-16') },
+      quality:
+        state.analysis.quality === null
+          ? null
+          : { ...state.analysis.quality, cutoff: isoDate('2026-07-15') },
+      valuation:
+        state.analysis.valuation === null
+          ? null
+          : { ...state.analysis.valuation, cutoff: isoDate('2026-07-17') },
+    };
+    render(<StockWorkspace state={readyState({ analysis })} />);
+
+    for (const cutoff of ['2026-07-16', '2026-07-15', '2026-07-17']) {
+      const timestamp = screen.getByText(`数据截止 ${cutoff}`);
+      expect(timestamp.tagName).toBe('TIME');
+      expect(timestamp.getAttribute('datetime')).toBe(cutoff);
+    }
+  });
+
+  it('distinguishes delayed market snapshots from other delayed resources', () => {
+    const staleMarket = readyState();
+    const { unmount } = render(<StockWorkspace state={staleMarket} />);
+    expect(
+      screen.getByText(
+        (_content, element) =>
+          element?.classList.contains('stale-banner') === true &&
+          element.textContent?.includes('市场快照最后成功更新') === true,
+      ),
+    ).toBeVisible();
+    unmount();
+
+    const fresh = freshState();
+    if (fresh.history.status !== 'success') {
+      throw new Error('Expected history fixture');
+    }
+    render(
+      <StockWorkspace
+        state={{
+          ...fresh,
+          freshness: 'stale',
+          dataStatus: 'stale',
+          history: {
+            status: 'success',
+            envelope: { ...fresh.history.envelope, freshness: 'stale' },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText('数据含延迟项')).toBeVisible();
+    expect(screen.queryByText(/市场快照最后成功更新/)).toBeNull();
   });
 
   it('shows an unavailable cutoff when no successful market-data envelope exists', () => {
@@ -415,7 +521,7 @@ describe('StockWorkspace', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '技术分析' }));
     expect(screen.getByRole('heading', { name: '价格与成交量' })).toBeVisible();
-    expect(screen.getByText(/Copyright \(c\) 2025 TradingView/)).toBeVisible();
+    expect(screen.getByText(/Copyright \(с\) 2025 TradingView/)).toBeVisible();
   });
 
   it('shows explicit current-period limitations instead of fabricating a trend series', () => {
@@ -529,7 +635,7 @@ describe('workspace status derivation', () => {
         { status: 'success', envelope: envelope({ value: 1 }, { freshness: 'stale' }) },
         { status: 'loading' },
       ],
-      'stale',
+      'loading',
     ],
   ] as const)('aggregates resource state with precedence: %s -> %s', (resources, expected) => {
     expect(aggregateWorkspaceDataStatus(resources)).toBe(expected);
@@ -542,6 +648,37 @@ describe('workspace status derivation', () => {
   it('derives request dates from Asia/Shanghai across the UTC date boundary', () => {
     expect(toShanghaiIsoDate(new Date('2026-07-17T15:59:59.000Z'))).toBe('2026-07-17');
     expect(toShanghaiIsoDate(new Date('2026-07-17T16:00:00.000Z'))).toBe('2026-07-18');
+  });
+
+  it('derives daily return from the final two history rows only', () => {
+    const history = historyFixture();
+    const analysis = createWorkspaceAnalysis({
+      history: envelope(history),
+      overview: envelope({
+        code: CODE,
+        name: '贵州茅台',
+        date: AS_OF,
+        close: 1,
+        previousClose: 100,
+        changePercent: -99,
+        peTtm: 20,
+        pb: 8,
+        totalMarketValueCny: 1,
+      }),
+      fundamentals: null,
+    });
+    const volumeConfirmation = analysis.trend?.observations.find(
+      (observation) => observation.key === 'volumeConfirmation',
+    );
+    const latest = history.at(-1);
+    const previous = history.at(-2);
+    if (latest === undefined || previous === undefined) {
+      throw new Error('Expected two history rows');
+    }
+
+    expect(volumeConfirmation?.raw).toMatchObject({
+      dailyReturn: latest.close / previous.close - 1,
+    });
   });
 });
 
@@ -708,15 +845,103 @@ describe('useStockWorkspace', () => {
     },
   );
 
+  it.each([
+    [
+      'overview',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.overview = { ...bodies.overview, asOf: isoDate('2026-07-18') };
+      },
+    ],
+    [
+      'overview',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.overview = {
+          ...bodies.overview,
+          data: { ...(bodies.overview.data as Record<string, unknown>), date: '2026-07-16' },
+        };
+      },
+    ],
+    [
+      'history',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.history = { ...bodies.history, asOf: isoDate('2026-07-16') };
+      },
+    ],
+    [
+      'history',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.history = {
+          ...bodies.history,
+          data: (bodies.history.data as readonly DailyPrice[]).filter(
+            (row) => row.date < '2026-07-17',
+          ),
+        };
+      },
+    ],
+    [
+      'history',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.history = { ...bodies.history, asOf: isoDate('2026-07-18') };
+      },
+    ],
+    [
+      'fundamentals',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.fundamentals = {
+          ...bodies.fundamentals,
+          asOf: isoDate('2026-07-16'),
+          data: { ...(bodies.fundamentals.data as Record<string, unknown>), date: '2026-07-17' },
+        };
+      },
+    ],
+    [
+      'fundamentals',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.fundamentals = { ...bodies.fundamentals, asOf: isoDate('2026-07-18') };
+      },
+    ],
+    [
+      'marketStatus',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.marketStatus = {
+          ...bodies.marketStatus,
+          data: {
+            ...(bodies.marketStatus.data as Record<string, unknown>),
+            freshness: 'fresh',
+          },
+          freshness: 'stale',
+        };
+      },
+    ],
+    [
+      'marketStatus',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.marketStatus = {
+          ...bodies.marketStatus,
+          data: { ...(bodies.marketStatus.data as Record<string, unknown>), asOf: '2026-07-16' },
+        };
+      },
+    ],
+  ] as const)('rejects future or inconsistent %s cutoff identity', async (endpoint, mutate) => {
+    const bodies = validWorkspaceBodies();
+    mutate(bodies);
+    const fetchClient = workspaceFetchClient(bodies);
+    const { result } = renderHook(() =>
+      useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+    );
+
+    await waitFor(() => expect(result.current[endpoint].status).toBe('error'));
+  });
+
   it('binds visible resources to the current request key during a synchronous stock switch', async () => {
     const bodies = validWorkspaceBodies();
     let pending = false;
-    const fetchClient: WorkspaceFetchClient = async (input) => {
+    const fetchClient = vi.fn<WorkspaceFetchClient>(async (input) => {
       if (pending) {
         return new Promise<Response>(() => undefined);
       }
       return workspaceFetchClient(bodies)(input);
-    };
+    });
     let synchronousSwitch: StockWorkspaceState | undefined;
     const nextCode = stockCode('000001.SZ');
     const { result, rerender } = renderHook(
@@ -737,15 +962,30 @@ describe('useStockWorkspace', () => {
     expect(synchronousSwitch?.overview.status).toBe('loading');
     expect(synchronousSwitch?.history.status).toBe('loading');
     expect(synchronousSwitch?.fundamentals.status).toBe('loading');
-    expect(synchronousSwitch?.marketStatus.status).toBe('loading');
+    expect(synchronousSwitch?.marketStatus.status).toBe('success');
+    expect(fetchClient).toHaveBeenCalledTimes(7);
   });
 
   it('uses resource envelope dates for analysis and the earliest data cutoff on lagged weekends', async () => {
     const bodies = validWorkspaceBodies();
     bodies.overview = { ...bodies.overview, asOf: isoDate('2026-07-17') };
-    bodies.history = { ...bodies.history, asOf: isoDate('2026-07-16') };
-    bodies.fundamentals = { ...bodies.fundamentals, asOf: isoDate('2026-07-15') };
-    bodies.marketStatus = { ...bodies.marketStatus, asOf: isoDate('2026-07-18') };
+    bodies.history = {
+      ...bodies.history,
+      asOf: isoDate('2026-07-16'),
+      data: (bodies.history.data as readonly DailyPrice[]).filter(
+        (row) => row.date <= '2026-07-16',
+      ),
+    };
+    bodies.fundamentals = {
+      ...bodies.fundamentals,
+      asOf: isoDate('2026-07-15'),
+      data: { ...(bodies.fundamentals.data as Record<string, unknown>), date: '2026-07-15' },
+    };
+    bodies.marketStatus = {
+      ...bodies.marketStatus,
+      asOf: isoDate('2026-07-18'),
+      data: { ...(bodies.marketStatus.data as Record<string, unknown>), asOf: '2026-07-18' },
+    };
     const fetchClient = workspaceFetchClient(bodies);
 
     const { result } = renderHook(() =>
@@ -765,8 +1005,18 @@ describe('useStockWorkspace', () => {
 
   it('does not invent a valuation cutoff when overview fails', async () => {
     const bodies = validWorkspaceBodies();
-    bodies.history = { ...bodies.history, asOf: isoDate('2026-07-16') };
-    bodies.fundamentals = { ...bodies.fundamentals, asOf: isoDate('2026-07-15') };
+    bodies.history = {
+      ...bodies.history,
+      asOf: isoDate('2026-07-16'),
+      data: (bodies.history.data as readonly DailyPrice[]).filter(
+        (row) => row.date <= '2026-07-16',
+      ),
+    };
+    bodies.fundamentals = {
+      ...bodies.fundamentals,
+      asOf: isoDate('2026-07-15'),
+      data: { ...(bodies.fundamentals.data as Record<string, unknown>), date: '2026-07-15' },
+    };
     const fetchClient: WorkspaceFetchClient = async (input) =>
       String(input).includes('/overview')
         ? new Response(null, { status: 503 })
@@ -805,5 +1055,45 @@ describe('useStockWorkspace', () => {
     expect(result.current.analysis.trend).toBeNull();
     expect(result.current.analysis.quality).toBeNull();
     expect(result.current.analysis.valuation).toBeNull();
+  });
+
+  it('keeps technical analysis stable while overview and fundamentals settle later', async () => {
+    const bodies = validWorkspaceBodies();
+    const resolvers = new Map<WorkspaceEndpoint, (response: Response) => void>();
+    const fetchClient = vi.fn<WorkspaceFetchClient>((input) => {
+      const url = String(input);
+      const endpoint: WorkspaceEndpoint = url.includes('/overview')
+        ? 'overview'
+        : url.includes('/history')
+          ? 'history'
+          : url.includes('/fundamentals')
+            ? 'fundamentals'
+            : 'marketStatus';
+      return new Promise((resolve) => resolvers.set(endpoint, resolve));
+    });
+    const technicalReferences: Array<StockWorkspaceState['analysis']['technical']> = [];
+    function Harness() {
+      const state = useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient });
+      technicalReferences.push(state.analysis.technical);
+      return <StockWorkspace state={state} />;
+    }
+    const createChartMock = vi.mocked(createChart);
+    createChartMock.mockClear();
+    render(<Harness />);
+    await waitFor(() => expect(resolvers.size).toBe(4));
+
+    await act(async () => resolvers.get('marketStatus')?.(Response.json(bodies.marketStatus)));
+    await act(async () => resolvers.get('history')?.(Response.json(bodies.history)));
+    const technicalAfterHistory = technicalReferences.at(-1);
+    expect(technicalAfterHistory).not.toBeNull();
+    expect(createChartMock).not.toHaveBeenCalled();
+
+    await act(async () => resolvers.get('overview')?.(Response.json(bodies.overview)));
+    expect(technicalReferences.at(-1)).toBe(technicalAfterHistory);
+    expect(createChartMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => resolvers.get('fundamentals')?.(Response.json(bodies.fundamentals)));
+    expect(technicalReferences.at(-1)).toBe(technicalAfterHistory);
+    expect(createChartMock).toHaveBeenCalledTimes(1);
   });
 });

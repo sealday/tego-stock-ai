@@ -183,6 +183,84 @@ describe('StockSearch', () => {
     expect(signals[1]?.aborted).toBe(false);
   });
 
+  it('keeps an in-flight search alive when only surrounding whitespace changes', async () => {
+    vi.useFakeTimers();
+    let resolveSearch: ((value: readonly StockSearchResult[]) => void) | undefined;
+    const search = vi.fn<StockSearchFunction>(
+      () =>
+        new Promise((resolve) => {
+          resolveSearch = resolve;
+        }),
+    );
+    render(<StockSearch onSelect={vi.fn()} search={search} />);
+    const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+
+    fireEvent.change(input, { target: { value: '贵州' } });
+    await advance(300);
+    const signal = search.mock.calls[0]?.[1];
+    fireEvent.change(input, { target: { value: '  贵州  ' } });
+
+    expect(search).toHaveBeenCalledOnce();
+    expect(signal?.aborted).toBe(false);
+    await act(async () => resolveSearch?.([MOUTAI]));
+    expect(screen.getByRole('option', { name: /贵州茅台/ })).toBeVisible();
+  });
+
+  it.each(['debounce', 'inflight', 'empty', 'error'] as const)(
+    'Escape closes the %s popup and cancels pending work',
+    async (phase) => {
+      vi.useFakeTimers();
+      const signals: AbortSignal[] = [];
+      const search = vi.fn<StockSearchFunction>((_query, signal) => {
+        signals.push(signal);
+        if (phase === 'error') {
+          return Promise.reject(new Error('provider details'));
+        }
+        return phase === 'empty' ? Promise.resolve([]) : new Promise(() => undefined);
+      });
+      render(<StockSearch onSelect={vi.fn()} search={search} />);
+      const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+      fireEvent.change(input, { target: { value: '贵州' } });
+
+      if (phase !== 'debounce') {
+        await advance(300);
+      }
+      if (phase === 'error') {
+        expect(screen.getByRole('alert')).toBeVisible();
+      } else if (phase === 'empty') {
+        expect(screen.getByRole('status').textContent).toContain('未找到匹配的 A 股');
+      }
+
+      fireEvent.keyDown(input, { key: 'Escape' });
+      expect(input.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByRole('listbox')).toBeNull();
+
+      await advance(300);
+      expect(search).toHaveBeenCalledTimes(phase === 'debounce' ? 0 : 1);
+      if (phase === 'inflight') {
+        expect(signals[0]?.aborted).toBe(true);
+      }
+    },
+  );
+
+  it.each([
+    ['loading', vi.fn<StockSearchFunction>(() => new Promise(() => undefined))],
+    ['empty', vi.fn<StockSearchFunction>(async () => [])],
+    ['error', vi.fn<StockSearchFunction>(async () => Promise.reject(new Error('safe')))],
+  ] as const)(
+    'keeps aria-controls attached to a semantic listbox while %s',
+    async (_phase, search) => {
+      vi.useFakeTimers();
+      render(<StockSearch onSelect={vi.fn()} search={search} />);
+      const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+      fireEvent.change(input, { target: { value: '贵州' } });
+      await advance(300);
+
+      const popup = screen.getByRole('listbox');
+      expect(input.getAttribute('aria-controls')).toBe(popup.id);
+    },
+  );
+
   it('rejects a malformed default API envelope with a safe message', async () => {
     vi.useFakeTimers();
     vi.stubGlobal(

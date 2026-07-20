@@ -88,7 +88,7 @@ export function TerminalShell({
           </dl>
           {dataStatus === 'stale' && lastSuccessfulAt !== undefined ? (
             <p className="terminal-topbar__stale-note">
-              最后成功更新：
+              市场快照最后成功更新：
               <time dateTime={lastSuccessfulAt}>{formatShanghaiTimestamp(lastSuccessfulAt)}</time>
             </p>
           ) : null}

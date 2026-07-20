@@ -93,15 +93,13 @@ export function useStockWorkspace({
   const [fundamentalsState, setFundamentals] = useState<KeyedWorkspaceResource<StockFundamentals>>(
     () => ({ key: requestKey, resource: { status: 'loading' } }),
   );
-  const [marketStatusState, setMarketStatus] = useState<
-    KeyedWorkspaceResource<MarketSnapshotStatus>
-  >(() => ({ key: requestKey, resource: { status: 'loading' } }));
+  const [marketStatus, setMarketStatus] = useState<WorkspaceResource<MarketSnapshotStatus>>({
+    status: 'loading',
+  });
 
   const overview = visibleResource(overviewState, requestKey);
   const history = visibleResource(historyState, requestKey);
   const fundamentals = visibleResource(fundamentalsState, requestKey);
-  const marketStatus = visibleResource(marketStatusState, requestKey);
-
   useEffect(() => {
     const controller = new AbortController();
     const request = <T>(
@@ -139,12 +137,11 @@ export function useStockWorkspace({
     setOverview(loading);
     setHistory(loading);
     setFundamentals(loading);
-    setMarketStatus(loading);
 
     const historyStart = previousYear(asOf);
     request(
       `/api/stocks/${code}/overview?asOf=${asOf}`,
-      (value) => parseOverviewEnvelope(value, code),
+      (value) => parseOverviewEnvelope(value, code, asOf),
       setOverview,
     );
     request(
@@ -154,22 +151,60 @@ export function useStockWorkspace({
     );
     request(
       `/api/stocks/${code}/fundamentals?asOf=${asOf}`,
-      (value) => parseFundamentalsEnvelope(value, code),
+      (value) => parseFundamentalsEnvelope(value, code, asOf),
       setFundamentals,
     );
-    request('/api/market/status', parseMarketStatusEnvelope, setMarketStatus);
 
     return () => controller.abort();
   }, [asOf, code, fetchClient, requestKey]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setMarketStatus({ status: 'loading' });
+    void fetchClient('/api/market/status', {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error('Workspace request failed');
+        }
+        const body: unknown = await response.json();
+        return parseMarketStatusEnvelope(body);
+      })
+      .then((envelope) => {
+        if (!controller.signal.aborted) {
+          setMarketStatus({ status: 'success', envelope });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setMarketStatus({ status: 'error', message: SAFE_RESOURCE_ERROR });
+        }
+      });
+
+    return () => controller.abort();
+  }, [fetchClient]);
+
+  const historyEnvelope = history.status === 'success' ? history.envelope : null;
+  const overviewEnvelope = overview.status === 'success' ? overview.envelope : null;
+  const fundamentalsEnvelope = fundamentals.status === 'success' ? fundamentals.envelope : null;
+  const technical = useMemo(() => calculateWorkspaceTechnical(historyEnvelope), [historyEnvelope]);
+  const trend = useMemo(
+    () => calculateWorkspaceTrend(historyEnvelope, technical),
+    [historyEnvelope, technical],
+  );
+  const quality = useMemo(
+    () => calculateWorkspaceQuality(fundamentalsEnvelope),
+    [fundamentalsEnvelope],
+  );
+  const valuation = useMemo(
+    () => calculateWorkspaceValuation(overviewEnvelope),
+    [overviewEnvelope],
+  );
   const analysis = useMemo(
-    () =>
-      createWorkspaceAnalysis({
-        history: history.status === 'success' ? history.envelope : null,
-        overview: overview.status === 'success' ? overview.envelope : null,
-        fundamentals: fundamentals.status === 'success' ? fundamentals.envelope : null,
-      }),
-    [fundamentals, history, overview],
+    () => ({ technical, trend, quality, valuation }),
+    [quality, technical, trend, valuation],
   );
 
   const hasStaleResource = [overview, history, fundamentals, marketStatus].some(
@@ -204,13 +239,6 @@ function visibleResource<T>(
 export function aggregateWorkspaceDataStatus(
   resources: readonly WorkspaceResourceStatus[],
 ): WorkspaceDataStatus {
-  if (
-    resources.some(
-      (resource) => resource.status === 'success' && resource.envelope.freshness === 'stale',
-    )
-  ) {
-    return 'stale';
-  }
   if (resources.some((resource) => resource.status === 'loading')) {
     return 'loading';
   }
@@ -222,6 +250,13 @@ export function aggregateWorkspaceDataStatus(
   }
   if (successCount > 0 && errorCount > 0) {
     return 'partial';
+  }
+  if (
+    resources.some(
+      (resource) => resource.status === 'success' && resource.envelope.freshness === 'stale',
+    )
+  ) {
+    return 'stale';
   }
   return 'fresh';
 }
@@ -335,60 +370,90 @@ export function createWorkspaceAnalysis({
   overview,
   fundamentals,
 }: WorkspaceAnalysisSources): WorkspaceAnalysis {
+  const technical = calculateWorkspaceTechnical(history);
+
+  return {
+    technical,
+    trend: calculateWorkspaceTrend(history, technical),
+    quality: calculateWorkspaceQuality(fundamentals),
+    valuation: calculateWorkspaceValuation(overview),
+  };
+}
+
+function calculateWorkspaceTechnical(
+  history: MarketEnvelope<readonly DailyPrice[]> | null,
+): TechnicalIndicators | null {
   const historyRows = history?.data ?? [];
   const sortedHistory = [...historyRows].sort((left, right) => left.date.localeCompare(right.date));
   const closes = sortedHistory.map(({ close }) => close);
   const volumes = sortedHistory.map(({ volumeShares }) => volumeShares);
-  const technical = closes.length === 0 ? null : calculateTechnicalIndicators({ closes, volumes });
+  return closes.length === 0 ? null : calculateTechnicalIndicators({ closes, volumes });
+}
+
+function calculateWorkspaceTrend(
+  history: MarketEnvelope<readonly DailyPrice[]> | null,
+  technical: TechnicalIndicators | null,
+): ExplainableScore | null {
+  if (history === null) {
+    return null;
+  }
+  const sortedHistory = [...history.data].sort((left, right) =>
+    left.date.localeCompare(right.date),
+  );
+  const closes = sortedHistory.map(({ close }) => close);
   const latestIndex = closes.length - 1;
   const previousIndex = latestIndex - 1;
+  const latestClose = closes[latestIndex];
+  const previousClose = closes[previousIndex];
 
-  return {
-    technical,
-    trend:
-      history === null
-        ? null
-        : calculateTrendScore(
-            {
-              close: closes[latestIndex] ?? null,
-              ma20: seriesValue(technical?.sma20, latestIndex),
-              ma60: seriesValue(technical?.sma60, latestIndex),
-              previousMa20: seriesValue(technical?.sma20, previousIndex),
-              macdHistogram: seriesValue(technical?.macd.histogram, latestIndex),
-              volumeRatio20: seriesValue(technical?.volumeRatio20.values, latestIndex),
-              dailyReturn: overview?.data.changePercent ?? null,
-            },
-            history.asOf,
-          ),
-    quality:
-      fundamentals === null
-        ? null
-        : calculateQualityScore(
-            {
-              roe: fundamentals.data.roe,
-              grossMargin: fundamentals.data.grossMargin,
-              revenueGrowth: fundamentals.data.revenueGrowth,
-              profitGrowth: fundamentals.data.profitGrowth,
-              operatingCashToNetProfit: fundamentals.data.operatingCashToNetProfit,
-              debtToAssets: fundamentals.data.debtToAssets,
-            },
-            fundamentals.asOf,
-          ),
-    valuation:
-      overview === null
-        ? null
-        : calculateValuationScore(
-            {
-              pe:
-                overview.data.peTtm === null
-                  ? null
-                  : { current: overview.data.peTtm, reference: [] },
-              pb: overview.data.pb === null ? null : { current: overview.data.pb, reference: [] },
-              dividendYield: null,
-            },
-            overview.asOf,
-          ),
-  };
+  return calculateTrendScore(
+    {
+      close: latestClose ?? null,
+      ma20: seriesValue(technical?.sma20, latestIndex),
+      ma60: seriesValue(technical?.sma60, latestIndex),
+      previousMa20: seriesValue(technical?.sma20, previousIndex),
+      macdHistogram: seriesValue(technical?.macd.histogram, latestIndex),
+      volumeRatio20: seriesValue(technical?.volumeRatio20.values, latestIndex),
+      dailyReturn:
+        latestClose === undefined || previousClose === undefined
+          ? null
+          : latestClose / previousClose - 1,
+    },
+    history.asOf,
+  );
+}
+
+function calculateWorkspaceQuality(
+  fundamentals: MarketEnvelope<StockFundamentals> | null,
+): ExplainableScore | null {
+  return fundamentals === null
+    ? null
+    : calculateQualityScore(
+        {
+          roe: fundamentals.data.roe,
+          grossMargin: fundamentals.data.grossMargin,
+          revenueGrowth: fundamentals.data.revenueGrowth,
+          profitGrowth: fundamentals.data.profitGrowth,
+          operatingCashToNetProfit: fundamentals.data.operatingCashToNetProfit,
+          debtToAssets: fundamentals.data.debtToAssets,
+        },
+        fundamentals.asOf,
+      );
+}
+
+function calculateWorkspaceValuation(
+  overview: MarketEnvelope<StockOverview> | null,
+): ExplainableScore | null {
+  return overview === null
+    ? null
+    : calculateValuationScore(
+        {
+          pe: overview.data.peTtm === null ? null : { current: overview.data.peTtm, reference: [] },
+          pb: overview.data.pb === null ? null : { current: overview.data.pb, reference: [] },
+          dividendYield: null,
+        },
+        overview.asOf,
+      );
 }
 
 function earliestDataCutoff(
@@ -418,8 +483,9 @@ function previousYear(value: IsoDate): IsoDate {
 function parseOverviewEnvelope(
   value: unknown,
   expectedCode: StockCode,
+  requestedAsOf: IsoDate,
 ): MarketEnvelope<StockOverview> {
-  return parseEnvelope(value, (data) => {
+  const envelope = parseEnvelope<StockOverview>(value, (data) => {
     const record = readRecord(data, 'overview');
     const overview = {
       code: stockCode(readString(record, 'code')),
@@ -435,6 +501,10 @@ function parseOverviewEnvelope(
     assertExpectedCode(overview.code, expectedCode);
     return overview;
   });
+  if (envelope.asOf > requestedAsOf || envelope.data.date !== envelope.asOf) {
+    throw new TypeError('Invalid overview cutoff identity');
+  }
+  return envelope;
 }
 
 function parseHistoryEnvelope(
@@ -443,7 +513,7 @@ function parseHistoryEnvelope(
   start: IsoDate,
   end: IsoDate,
 ): MarketEnvelope<readonly DailyPrice[]> {
-  return parseEnvelope(value, (data) => {
+  const envelope = parseEnvelope(value, (data) => {
     if (!Array.isArray(data)) {
       throw new TypeError('Invalid history');
     }
@@ -483,13 +553,26 @@ function parseHistoryEnvelope(
       return row;
     });
   });
+  if (envelope.asOf > end) {
+    throw new TypeError('Invalid history cutoff identity');
+  }
+  const dates = envelope.data.map(({ date }) => date);
+  if (
+    dates.some((date) => date > envelope.asOf) ||
+    (dates.length > 0 &&
+      dates.reduce((latest, date) => (date > latest ? date : latest)) !== envelope.asOf)
+  ) {
+    throw new TypeError('Invalid history cutoff identity');
+  }
+  return envelope;
 }
 
 function parseFundamentalsEnvelope(
   value: unknown,
   expectedCode: StockCode,
+  requestedAsOf: IsoDate,
 ): MarketEnvelope<StockFundamentals> {
-  return parseEnvelope(value, (data) => {
+  const envelope = parseEnvelope(value, (data) => {
     const record = readRecord(data, 'fundamentals');
     const fundamentals = {
       code: stockCode(readString(record, 'code')),
@@ -504,6 +587,10 @@ function parseFundamentalsEnvelope(
     assertExpectedCode(fundamentals.code, expectedCode);
     return fundamentals;
   });
+  if (envelope.asOf > requestedAsOf || envelope.data.date > envelope.asOf) {
+    throw new TypeError('Invalid fundamentals cutoff identity');
+  }
+  return envelope;
 }
 
 function assertExpectedCode(actual: StockCode, expected: StockCode): void {
@@ -513,7 +600,7 @@ function assertExpectedCode(actual: StockCode, expected: StockCode): void {
 }
 
 function parseMarketStatusEnvelope(value: unknown): MarketEnvelope<MarketSnapshotStatus> {
-  return parseEnvelope(value, (data) => {
+  const envelope = parseEnvelope<MarketSnapshotStatus>(value, (data) => {
     const record = readRecord(data, 'market status');
     const freshness = readString(record, 'freshness');
     if (freshness !== 'fresh' && freshness !== 'stale') {
@@ -526,6 +613,10 @@ function parseMarketStatusEnvelope(value: unknown): MarketEnvelope<MarketSnapsho
       freshness,
     };
   });
+  if (envelope.asOf !== envelope.data.asOf || envelope.freshness !== envelope.data.freshness) {
+    throw new TypeError('Invalid market status identity');
+  }
+  return envelope;
 }
 
 function parseEnvelope<T>(value: unknown, parseData: (data: unknown) => T): MarketEnvelope<T> {

@@ -8,7 +8,7 @@ import {
   type LineData,
   type Time,
 } from 'lightweight-charts';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 
 import type { TechnicalIndicators } from '../../analysis/indicators';
 import type { DailyPrice } from '../../domain/stock';
@@ -21,6 +21,7 @@ export interface PriceChartProps {
 type OverlayIndicator = 'moving-averages' | 'bollinger';
 
 export function PriceChart({ history, indicators }: PriceChartProps) {
+  const overlayId = useId();
   const containerReference = useRef<HTMLDivElement>(null);
   const [overlay, setOverlay] = useState<OverlayIndicator>('moving-averages');
   const sortedHistory = useMemo(
@@ -102,9 +103,9 @@ export function PriceChart({ history, indicators }: PriceChartProps) {
   return (
     <div className="price-chart">
       <div className="price-chart__toolbar">
-        <label htmlFor="chart-overlay">叠加指标</label>
+        <label htmlFor={overlayId}>叠加指标</label>
         <select
-          id="chart-overlay"
+          id={overlayId}
           value={overlay}
           onChange={(event) => setOverlay(event.currentTarget.value as OverlayIndicator)}
         >
@@ -115,7 +116,7 @@ export function PriceChart({ history, indicators }: PriceChartProps) {
       <p className="visually-hidden">
         {latest === undefined
           ? '暂无可用价格数据。'
-          : `最新日期 ${latest.date}，收盘价 ${formatNumber(latest.close)} 元，成交量 ${formatNumber(latest.volumeShares)} 股。图表包含日 K 线、成交量和 MA5、MA20、MA60。`}
+          : `最新日期 ${latest.date}，收盘价 ${formatNumber(latest.close)} 元，成交量 ${formatNumber(latest.volumeShares)} 股。图表包含日 K 线和成交量。当前叠加指标：${overlay === 'bollinger' ? '布林带、MA5、MA20、MA60' : 'MA5、MA20、MA60'}。`}
       </p>
       <div ref={containerReference} className="price-chart__canvas" aria-hidden="true" />
       <details className="price-chart__table">
@@ -148,11 +149,6 @@ export function PriceChart({ history, indicators }: PriceChartProps) {
           </table>
         </div>
       </details>
-      <p className="price-chart__attribution">
-        <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">
-          Copyright (c) 2025 TradingView, Inc. https://www.tradingview.com/
-        </a>
-      </p>
     </div>
   );
 }

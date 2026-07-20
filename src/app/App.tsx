@@ -23,7 +23,13 @@ export function App() {
       source={workspace.source}
       cutoff={workspace.cutoff}
       dataStatus={workspace.dataStatus}
-      lastSuccessfulAt={workspace.lastSuccessfulAt}
+      lastSuccessfulAt={
+        workspace.marketStatus.status === 'success' &&
+        (workspace.marketStatus.envelope.freshness === 'stale' ||
+          workspace.marketStatus.envelope.data.freshness === 'stale')
+          ? workspace.lastSuccessfulAt
+          : undefined
+      }
       onStockSelect={setSelectedStock}
     >
       <h1 className="visually-hidden">A 股研究终端</h1>

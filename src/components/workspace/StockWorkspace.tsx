@@ -12,6 +12,10 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('overview');
   const tabReferences = useRef<Array<HTMLButtonElement | null>>([]);
   const name = state.overview.status === 'success' ? state.overview.envelope.data.name : state.code;
+  const marketSnapshotStale =
+    state.marketStatus.status === 'success' &&
+    (state.marketStatus.envelope.freshness === 'stale' ||
+      state.marketStatus.envelope.data.freshness === 'stale');
 
   return (
     <article
@@ -42,12 +46,18 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
         </dl>
       </header>
 
-      {state.freshness === 'stale' && state.lastSuccessfulAt !== undefined ? (
+      {state.freshness === 'stale' ? (
         <p className="stale-banner">
-          数据延迟 · 最后成功更新{' '}
-          <time dateTime={state.lastSuccessfulAt}>
-            {formatShanghaiTimestamp(state.lastSuccessfulAt)}
-          </time>
+          {marketSnapshotStale && state.lastSuccessfulAt !== undefined ? (
+            <>
+              数据延迟 · 市场快照最后成功更新{' '}
+              <time dateTime={state.lastSuccessfulAt}>
+                {formatShanghaiTimestamp(state.lastSuccessfulAt)}
+              </time>
+            </>
+          ) : (
+            '数据含延迟项'
+          )}
         </p>
       ) : null}
 
@@ -86,13 +96,24 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
         ))}
       </div>
 
-      <div id={`panel-${activeTab}`} role="tabpanel" aria-labelledby={`tab-${activeTab}`}>
-        {activeTab === 'overview' ? <OverviewPanel state={state} /> : null}
-        {activeTab === 'technical' ? <TechnicalPanel state={state} /> : null}
-        {activeTab === 'fundamentals' ? <FundamentalsPanel state={state} /> : null}
-        {activeTab === 'financial-trends' ? <FinancialTrendsPanel state={state} /> : null}
-        {activeTab === 'ai-report' ? <AiReportPlaceholder /> : null}
-      </div>
+      {WORKSPACE_TABS.map((tab) => (
+        <div
+          key={tab.id}
+          id={`panel-${tab.id}`}
+          role="tabpanel"
+          aria-labelledby={`tab-${tab.id}`}
+          hidden={activeTab !== tab.id}
+        >
+          {activeTab === tab.id ? renderActivePanel(tab.id, state) : null}
+        </div>
+      ))}
+
+      <p className="price-chart__attribution">
+        <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">
+          TradingView Lightweight Charts™ Copyright (с) 2025 TradingView, Inc.
+          https://www.tradingview.com/
+        </a>
+      </p>
 
       <WorkspaceLimitations state={state} />
 
@@ -104,6 +125,22 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
       </footer>
     </article>
   );
+}
+
+function renderActivePanel(tab: WorkspaceTabId, state: StockWorkspaceState) {
+  if (tab === 'overview') {
+    return <OverviewPanel state={state} />;
+  }
+  if (tab === 'technical') {
+    return <TechnicalPanel state={state} />;
+  }
+  if (tab === 'fundamentals') {
+    return <FundamentalsPanel state={state} />;
+  }
+  if (tab === 'financial-trends') {
+    return <FinancialTrendsPanel state={state} />;
+  }
+  return <AiReportPlaceholder />;
 }
 
 function handleTabKeyDown(

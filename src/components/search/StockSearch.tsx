@@ -28,6 +28,8 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
   const listboxId = useId();
   const committedQueryReference = useRef<string | null>(null);
   const generationReference = useRef(0);
+  const controllerReference = useRef<AbortController | null>(null);
+  const timeoutReference = useRef<number | null>(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<readonly StockSearchResult[]>([]);
   const [status, setStatus] = useState<SearchStatus>('idle');
@@ -53,7 +55,9 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
     setResults([]);
     setStatus('loading');
     const controller = new AbortController();
+    controllerReference.current = controller;
     const timeout = window.setTimeout(() => {
+      timeoutReference.current = null;
       void search(normalizedQuery, controller.signal)
         .then((matches) => {
           if (controller.signal.aborted || generation !== generationReference.current) {
@@ -70,15 +74,23 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
           setStatus('error');
         });
     }, SEARCH_DELAY_MS);
+    timeoutReference.current = timeout;
 
     return () => {
       window.clearTimeout(timeout);
       controller.abort();
+      if (timeoutReference.current === timeout) {
+        timeoutReference.current = null;
+      }
+      if (controllerReference.current === controller) {
+        controllerReference.current = null;
+      }
     };
   }, [normalizedQuery, search]);
 
   function choose(stock: StockSearchResult) {
     generationReference.current += 1;
+    cancelPendingSearch();
     committedQueryReference.current = stock.name;
     setQuery(stock.name);
     setResults([]);
@@ -88,6 +100,14 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Escape') {
+      generationReference.current += 1;
+      cancelPendingSearch();
+      setResults([]);
+      setStatus('idle');
+      setActiveIndex(-1);
+      return;
+    }
     if (results.length === 0) {
       return;
     }
@@ -103,12 +123,16 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
       if (selected !== undefined) {
         choose(selected);
       }
-    } else if (event.key === 'Escape') {
-      generationReference.current += 1;
-      setResults([]);
-      setStatus('idle');
-      setActiveIndex(-1);
     }
+  }
+
+  function cancelPendingSearch() {
+    if (timeoutReference.current !== null) {
+      window.clearTimeout(timeoutReference.current);
+      timeoutReference.current = null;
+    }
+    controllerReference.current?.abort();
+    controllerReference.current = null;
   }
 
   const hasPopup = status === 'loading' || status === 'error' || status === 'success';
@@ -132,16 +156,26 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
         placeholder="代码 / 名称 / 拼音"
         onChange={(event) => {
           const nextQuery = event.currentTarget.value;
-          generationReference.current += 1;
           setQuery(nextQuery);
-          setResults([]);
-          setActiveIndex(-1);
-          setStatus(nextQuery.trim().length >= MINIMUM_QUERY_LENGTH ? 'loading' : 'idle');
+          const nextNormalizedQuery = nextQuery.trim();
+          if (nextNormalizedQuery !== normalizedQuery) {
+            generationReference.current += 1;
+            cancelPendingSearch();
+            setResults([]);
+            setActiveIndex(-1);
+            setStatus(nextNormalizedQuery.length >= MINIMUM_QUERY_LENGTH ? 'loading' : 'idle');
+          }
         }}
         onKeyDown={handleKeyDown}
       />
       {hasPopup ? (
-        <div className="stock-search__popover" id={listboxId}>
+        <div
+          className="stock-search__popover"
+          id={listboxId}
+          role="listbox"
+          aria-label="股票搜索结果"
+          aria-busy={status === 'loading'}
+        >
           {status === 'loading' ? (
             <p className="stock-search__message" role="status" aria-live="polite">
               正在搜索…
@@ -162,7 +196,7 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
             </p>
           ) : null}
           {status === 'success' && results.length > 0 ? (
-            <ul className="stock-search__results" role="listbox">
+            <ul className="stock-search__results" role="presentation">
               {results.map((stock, index) => (
                 <li
                   id={`${listboxId}-${index}`}

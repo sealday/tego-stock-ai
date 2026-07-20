@@ -131,6 +131,11 @@ function ScoreCard({
   return (
     <article className="score-card">
       <h3>{label}</h3>
+      {score === null ? null : (
+        <time className="score-card__cutoff" dateTime={score.cutoff}>
+          数据截止 {score.cutoff}
+        </time>
+      )}
       {score === null ? (
         <p className="missing-value">对应数据不可用</p>
       ) : score.score === null ? (
