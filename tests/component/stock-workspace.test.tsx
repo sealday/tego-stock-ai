@@ -249,7 +249,7 @@ function workspaceFetchClient(
 }
 
 describe('StockWorkspace', () => {
-  it('exposes all tabs and deterministic evidence before the Task 6 AI placeholder', () => {
+  it('exposes all tabs, deterministic evidence, and the browser-only AI report controls', () => {
     render(<StockWorkspace state={readyState()} />);
 
     expect(screen.getByRole('heading', { name: '贵州茅台量化研究' })).toBeVisible();
@@ -272,8 +272,9 @@ describe('StockWorkspace', () => {
     }
 
     fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
-    expect(screen.getByText(/Task 6 将提供/)).toBeVisible();
-    expect(screen.queryByRole('button', { name: /生成/ })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'AI 提供商设置' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '生成 AI 报告' })).toBeVisible();
+    expect(screen.getByText(/确定性分析摘要/)).toBeVisible();
   });
 
   it('keeps every tab control attached to a persistent hidden or visible tabpanel', () => {

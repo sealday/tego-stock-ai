@@ -1,7 +1,14 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 
+import { createWorkspaceReportContext } from '../../ai/report-contract';
 import { WORKSPACE_TABS, type WorkspaceTabId } from '../../app/routes';
 import { formatShanghaiTimestamp, type StockWorkspaceState } from '../../hooks/use-stock-workspace';
+import { AiReportPanel, type GeneratedAiReport } from '../ai/AiReportPanel';
+import {
+  AiSettings,
+  DEFAULT_AI_PROVIDER_SETTINGS,
+  type AiProviderSettings,
+} from '../ai/AiSettings';
 import { DataStatus } from './DataStatus';
 import { FinancialTrendsPanel } from './FinancialTrendsPanel';
 import { FundamentalsPanel } from './FundamentalsPanel';
@@ -10,6 +17,8 @@ import { TechnicalPanel } from './TechnicalPanel';
 
 export function StockWorkspace({ state }: { readonly state: StockWorkspaceState }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('overview');
+  const [aiSettings, setAiSettings] = useState<AiProviderSettings>(DEFAULT_AI_PROVIDER_SETTINGS);
+  const [savedReports, setSavedReports] = useState<readonly GeneratedAiReport[]>([]);
   const tabReferences = useRef<Array<HTMLButtonElement | null>>([]);
   const name = state.overview.status === 'success' ? state.overview.envelope.data.name : state.code;
   const marketSnapshotStale =
@@ -104,7 +113,20 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
           aria-labelledby={`tab-${tab.id}`}
           hidden={activeTab !== tab.id}
         >
-          {activeTab === tab.id ? renderActivePanel(tab.id, state) : null}
+          {tab.id === 'ai-report' ? (
+            <AiReportWorkspace
+              state={state}
+              active={activeTab === tab.id}
+              settings={aiSettings}
+              savedReportCount={savedReports.length}
+              onSettingsChange={setAiSettings}
+              onSaveReport={(report) =>
+                setSavedReports((currentReports) => [report, ...currentReports])
+              }
+            />
+          ) : activeTab === tab.id ? (
+            renderActivePanel(tab.id, state)
+          ) : null}
         </div>
       ))}
 
@@ -140,7 +162,7 @@ function renderActivePanel(tab: WorkspaceTabId, state: StockWorkspaceState) {
   if (tab === 'financial-trends') {
     return <FinancialTrendsPanel state={state} />;
   }
-  return <AiReportPlaceholder />;
+  return null;
 }
 
 function handleTabKeyDown(
@@ -194,15 +216,47 @@ function WorkspaceLimitations({ state }: { readonly state: StockWorkspaceState }
   );
 }
 
-function AiReportPlaceholder() {
+function AiReportWorkspace({
+  state,
+  active,
+  settings,
+  savedReportCount,
+  onSettingsChange,
+  onSaveReport,
+}: {
+  readonly state: StockWorkspaceState;
+  readonly active: boolean;
+  readonly settings: AiProviderSettings;
+  readonly savedReportCount: number;
+  readonly onSettingsChange: (settings: AiProviderSettings) => void;
+  readonly onSaveReport: (report: GeneratedAiReport) => void;
+}) {
+  const context = createWorkspaceReportContext(state);
+
   return (
-    <section className="workspace-panel" aria-labelledby="ai-report-heading">
-      <p className="panel-kicker">浏览器内 BYOK</p>
-      <h2 id="ai-report-heading">AI 报告</h2>
-      <p>
-        Task 6 将提供用户主动触发的 AI 研究报告。当前页面不会发起 AI
-        请求，确定性指标与数据缺口始终先于 AI 叙事展示。
-      </p>
-    </section>
+    <div className="ai-report-workspace">
+      {active ? <AiSettings value={settings} onChange={onSettingsChange} /> : null}
+      {context === null ? (
+        active ? (
+          <section className="workspace-panel" aria-labelledby="ai-report-heading">
+            <p className="panel-kicker">等待确定性上下文</p>
+            <h2 id="ai-report-heading">AI 报告</h2>
+            <p>数据截止日期尚不可用。确定性面板仍可使用，报告生成将在上下文完整后启用。</p>
+          </section>
+        ) : null
+      ) : (
+        <AiReportPanel
+          active={active}
+          context={context}
+          settings={settings}
+          onSaveReport={onSaveReport}
+        />
+      )}
+      {active && savedReportCount > 0 ? (
+        <p className="ai-report-workspace__saved-count">
+          当前页面会话已交给保存回调 {savedReportCount} 份完整报告。
+        </p>
+      ) : null}
+    </div>
   );
 }
