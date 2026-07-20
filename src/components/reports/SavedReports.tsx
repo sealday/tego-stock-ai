@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { LocalRepository, SavedReport } from '../../storage/repository';
 
@@ -7,53 +7,55 @@ export type SavedReportsRepository = Pick<LocalRepository, 'deleteReport' | 'lis
 export interface SavedReportsProps {
   readonly repository: SavedReportsRepository;
   readonly refreshKey?: number | undefined;
+  readonly disabled?: boolean | undefined;
 }
 
-export function SavedReports({ repository, refreshKey = 0 }: SavedReportsProps) {
+export function SavedReports({ repository, refreshKey = 0, disabled = false }: SavedReportsProps) {
   const [reports, setReports] = useState<readonly SavedReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const mounted = useRef(false);
+  const loadRequest = useRef(0);
 
   const load = useCallback(async () => {
+    const request = loadRequest.current + 1;
+    loadRequest.current = request;
     setLoading(true);
     setError(false);
     try {
-      setReports(await repository.listReports());
+      const storedReports = await repository.listReports();
+      if (mounted.current && loadRequest.current === request) {
+        setReports(storedReports);
+      }
     } catch {
-      setError(true);
+      if (mounted.current && loadRequest.current === request) {
+        setError(true);
+      }
     } finally {
-      setLoading(false);
+      if (mounted.current && loadRequest.current === request) {
+        setLoading(false);
+      }
     }
   }, [repository]);
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(false);
-    void repository
-      .listReports()
-      .then((storedReports) => {
-        if (active) {
-          setReports(storedReports);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setError(true);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
+    mounted.current = true;
     return () => {
-      active = false;
+      mounted.current = false;
+      loadRequest.current += 1;
     };
-  }, [refreshKey, repository]);
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshKey]);
 
   const remove = async (report: SavedReport) => {
+    if (disabled) {
+      return;
+    }
+    loadRequest.current += 1;
     setDeletingId(report.id);
     setError(false);
     try {
@@ -114,7 +116,7 @@ export function SavedReports({ repository, refreshKey = 0 }: SavedReportsProps) 
                   </div>
                   <button
                     type="button"
-                    disabled={deletingId === saved.id}
+                    disabled={disabled || deletingId === saved.id}
                     aria-label={`删除${
                       saved.report.status === 'complete' ? '完整报告' : '未完成草稿'
                     } ${saved.report.context.stock.name} ${saved.report.context.stock.code}`}

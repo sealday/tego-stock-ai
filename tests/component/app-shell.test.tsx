@@ -132,6 +132,46 @@ describe('App', () => {
     await localRepository.close();
   });
 
+  it('keeps watchlist mutations blocked until a failed initial hydration is retried', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
+    const listWatchlist = vi
+      .fn<AppRepository['listWatchlist']>()
+      .mockRejectedValueOnce(new Error('initial read failed'))
+      .mockResolvedValueOnce([BANK]);
+    const putWatchlistEntry = vi.fn<AppRepository['putWatchlistEntry']>().mockResolvedValue();
+    render(
+      <App
+        watchlistRepository={appRepository({
+          listWatchlist,
+          putWatchlistEntry,
+        })}
+      />,
+    );
+
+    await screen.findAllByRole('alert');
+    const blockedAddButtons = screen.getAllByRole('button', {
+      name: '添加贵州茅台到本地自选股',
+    });
+    expect(blockedAddButtons.every((button) => button.hasAttribute('disabled'))).toBe(true);
+    fireEvent.click(blockedAddButtons[0]!);
+    expect(putWatchlistEntry).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getAllByRole('button', { name: '重试本地自选股操作' })[0]!);
+    expect(await screen.findAllByRole('button', { name: '选择平安银行 000001.SZ' })).toHaveLength(
+      2,
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: '添加贵州茅台到本地自选股' })[0]!);
+
+    expect(await screen.findAllByRole('button', { name: '选择贵州茅台 600519.SH' })).toHaveLength(
+      2,
+    );
+    expect(screen.getAllByRole('button', { name: '选择平安银行 000001.SZ' })).toHaveLength(2);
+    expect(putWatchlistEntry).toHaveBeenCalledOnce();
+  });
+
   it('keeps watchlist failures safe and retries the failed action without storage details', async () => {
     vi.stubGlobal(
       'fetch',
@@ -224,5 +264,151 @@ describe('App', () => {
     expect(clearAll).toHaveBeenCalledOnce();
     await waitFor(() => expect(screen.getAllByText('尚未添加本地自选股。')).toHaveLength(2));
     expect(screen.getByLabelText('模型标识符')).toHaveProperty('value', '');
+  });
+
+  it('rehydrates the authoritative watchlist before reopening writes after clear-all fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
+    let resolveRecovery: (stocks: readonly StockSearchResult[]) => void = () => undefined;
+    const recovery = new Promise<readonly StockSearchResult[]>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    const listWatchlist = vi
+      .fn<AppRepository['listWatchlist']>()
+      .mockResolvedValueOnce([BANK])
+      .mockReturnValueOnce(recovery);
+    const putWatchlistEntry = vi.fn<AppRepository['putWatchlistEntry']>().mockResolvedValue();
+    render(
+      <App
+        watchlistRepository={appRepository({
+          clearAll: vi.fn<AppRepository['clearAll']>().mockRejectedValue(new Error('clear failed')),
+          listWatchlist,
+          putWatchlistEntry,
+        })}
+      />,
+    );
+
+    expect(await screen.findAllByRole('button', { name: '选择平安银行 000001.SZ' })).toHaveLength(
+      2,
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+    await screen.findByRole('heading', { name: 'AI 提供商设置' });
+    fireEvent.click(screen.getByRole('button', { name: '清除全部本地数据' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认清除全部数据' }));
+
+    await waitFor(() => expect(listWatchlist).toHaveBeenCalledTimes(2));
+    const blockedAddButtons = screen.getAllByRole('button', {
+      name: '添加贵州茅台到本地自选股',
+    });
+    expect(blockedAddButtons.every((button) => button.hasAttribute('disabled'))).toBe(true);
+    fireEvent.click(blockedAddButtons[0]!);
+    expect(putWatchlistEntry).not.toHaveBeenCalled();
+
+    resolveRecovery([BANK]);
+    await screen.findByRole('alert');
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole('button', { name: '添加贵州茅台到本地自选股' })
+          .every((button) => !button.hasAttribute('disabled')),
+      ).toBe(true),
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: '添加贵州茅台到本地自选股' })[0]!);
+    expect(await screen.findAllByRole('button', { name: '选择贵州茅台 600519.SH' })).toHaveLength(
+      2,
+    );
+    expect(screen.getAllByRole('button', { name: '选择平安银行 000001.SZ' })).toHaveLength(2);
+  });
+
+  it('keeps the watchlist gate closed until every clear-failure recovery succeeds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
+    let resolveWatchlistRecovery: (stocks: readonly StockSearchResult[]) => void = () => undefined;
+    const watchlistRecovery = new Promise<readonly StockSearchResult[]>((resolve) => {
+      resolveWatchlistRecovery = resolve;
+    });
+    const settingsRecovery = new Promise<Awaited<ReturnType<AppRepository['getSettings']>>>(
+      () => undefined,
+    );
+    const listWatchlist = vi
+      .fn<AppRepository['listWatchlist']>()
+      .mockResolvedValueOnce([BANK])
+      .mockReturnValueOnce(watchlistRecovery);
+    const getSettings = vi
+      .fn<AppRepository['getSettings']>()
+      .mockResolvedValueOnce(null)
+      .mockReturnValueOnce(settingsRecovery);
+    const putWatchlistEntry = vi.fn<AppRepository['putWatchlistEntry']>().mockResolvedValue();
+    render(
+      <App
+        watchlistRepository={appRepository({
+          clearAll: vi.fn<AppRepository['clearAll']>().mockRejectedValue(new Error('clear failed')),
+          getSettings,
+          listWatchlist,
+          putWatchlistEntry,
+        })}
+      />,
+    );
+
+    expect(await screen.findAllByRole('button', { name: '选择平安银行 000001.SZ' })).toHaveLength(
+      2,
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+    await screen.findByRole('heading', { name: 'AI 提供商设置' });
+    fireEvent.click(screen.getByRole('button', { name: '清除全部本地数据' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认清除全部数据' }));
+    await waitFor(() => expect(listWatchlist).toHaveBeenCalledTimes(2));
+
+    resolveWatchlistRecovery([BANK]);
+    await waitFor(() => expect(screen.getAllByText('平安银行').length).toBeGreaterThan(0));
+    const blockedAddButtons = screen.getAllByRole('button', {
+      name: '添加贵州茅台到本地自选股',
+    });
+    expect(blockedAddButtons.every((button) => button.hasAttribute('disabled'))).toBe(true);
+    fireEvent.click(blockedAddButtons[0]!);
+    expect(putWatchlistEntry).not.toHaveBeenCalled();
+  });
+
+  it('keeps the full write gate closed when authoritative clear-failure recovery also fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
+    const listWatchlist = vi
+      .fn<AppRepository['listWatchlist']>()
+      .mockResolvedValueOnce([BANK])
+      .mockRejectedValueOnce(new Error('recovery failed'));
+    const putWatchlistEntry = vi.fn<AppRepository['putWatchlistEntry']>().mockResolvedValue();
+    render(
+      <App
+        watchlistRepository={appRepository({
+          clearAll: vi.fn<AppRepository['clearAll']>().mockRejectedValue(new Error('clear failed')),
+          listWatchlist,
+          putWatchlistEntry,
+        })}
+      />,
+    );
+
+    expect(await screen.findAllByRole('button', { name: '选择平安银行 000001.SZ' })).toHaveLength(
+      2,
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+    await screen.findByRole('heading', { name: 'AI 提供商设置' });
+    fireEvent.click(screen.getByRole('button', { name: '清除全部本地数据' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认清除全部数据' }));
+
+    await screen.findByText(/本地数据操作失败/);
+    expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: '清除 AI 凭据' })).toHaveProperty('disabled', true);
+    const blockedAddButtons = screen.getAllByRole('button', {
+      name: '添加贵州茅台到本地自选股',
+    });
+    expect(blockedAddButtons.every((button) => button.hasAttribute('disabled'))).toBe(true);
+    fireEvent.click(blockedAddButtons[0]!);
+    expect(putWatchlistEntry).not.toHaveBeenCalled();
   });
 });

@@ -368,6 +368,42 @@ describe('LocalRepository', () => {
     await repository.close();
   });
 
+  it('orders credential clearing after an earlier settings write so the key cannot revive', async () => {
+    const name = databaseName('credential-mutation-order');
+    const database = await openLocalDatabase({ name });
+    const transaction = vi.spyOn(database, 'transaction');
+    const request = {
+      transaction: null,
+      result: database,
+      error: null,
+      onupgradeneeded: null,
+      onblocked: null,
+      onerror: null,
+      onsuccess: null,
+    } as unknown as IDBOpenDBRequest;
+    const factory = { open: vi.fn(() => request) } as unknown as IDBFactory;
+    const repository = new LocalRepository({ name, indexedDB: factory });
+
+    const write = repository.saveSettings(rememberedSettings('older-key'));
+    const clear = repository.clearCredentials();
+    await Promise.resolve();
+    request.onsuccess?.call(request, new Event('success'));
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    await write;
+    await clear;
+    await expect(repository.getSettings()).resolves.toEqual({
+      baseUrl: 'https://provider.example/v1',
+      model: 'research-model',
+      apiKey: '',
+      rememberApiKey: false,
+    });
+    await repository.close();
+  });
+
   it('deletes corrupt provider settings fail-closed when clearing credentials', async () => {
     const name = databaseName('corrupt-credentials');
     const database = await openLocalDatabase({ name });

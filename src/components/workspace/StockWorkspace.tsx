@@ -26,8 +26,9 @@ export interface StockWorkspaceProps {
   readonly storageEpoch?: number | undefined;
   readonly storageClearing?: boolean | undefined;
   readonly onAllLocalClearStart?: (() => void) | undefined;
-  readonly onAllLocalClearSuccess?: (() => void) | undefined;
-  readonly onAllLocalClearFailure?: (() => void) | undefined;
+  readonly onAllLocalClearSuccess?: (() => void | Promise<void>) | undefined;
+  readonly onAllLocalClearFailure?: (() => void | Promise<void>) | undefined;
+  readonly onAllLocalClearRecoverySuccess?: (() => void | Promise<void>) | undefined;
 }
 
 export function StockWorkspace({
@@ -38,6 +39,7 @@ export function StockWorkspace({
   onAllLocalClearStart,
   onAllLocalClearSuccess,
   onAllLocalClearFailure,
+  onAllLocalClearRecoverySuccess,
 }: StockWorkspaceProps) {
   const initialDestination = destinationFromHash(
     typeof window === 'undefined' ? '' : window.location.hash,
@@ -209,6 +211,7 @@ export function StockWorkspace({
                   onAllLocalClearStart={onAllLocalClearStart}
                   onAllLocalClearSuccess={onAllLocalClearSuccess}
                   onAllLocalClearFailure={onAllLocalClearFailure}
+                  onAllLocalClearRecoverySuccess={onAllLocalClearRecoverySuccess}
                 />
               </Suspense>
             ) : null

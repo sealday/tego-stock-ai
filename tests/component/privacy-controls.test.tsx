@@ -46,7 +46,7 @@ describe('PrivacyControls', () => {
     });
     await repository.saveReport(completeReport());
     let downloaded = '';
-    const onCredentialsCleared = vi.fn();
+    const onCredentialsClearSuccess = vi.fn();
     render(
       <PrivacyControls
         repository={repository}
@@ -54,7 +54,7 @@ describe('PrivacyControls', () => {
         download={(serialized) => {
           downloaded = serialized;
         }}
-        onCredentialsCleared={onCredentialsCleared}
+        onCredentialsClearSuccess={onCredentialsClearSuccess}
       />,
     );
 
@@ -70,7 +70,7 @@ describe('PrivacyControls', () => {
 
     await user.click(screen.getByRole('button', { name: '清除 AI 凭据' }));
     expect(await screen.findByText(/AI 凭据已清除/)).toBeVisible();
-    expect(onCredentialsCleared).toHaveBeenCalledOnce();
+    expect(onCredentialsClearSuccess).toHaveBeenCalledOnce();
     expect(await repository.getSettings()).toEqual({
       baseUrl: 'https://provider.example/v1',
       model: 'research-model',
@@ -181,6 +181,51 @@ describe('PrivacyControls', () => {
     expect(onAllCleared).toHaveBeenCalledOnce();
   });
 
+  it('awaits credential-clear lifecycle recovery before ending the pending state', async () => {
+    const user = userEvent.setup();
+    let finishFailureRecovery: () => void = () => undefined;
+    const clearCredentials = vi
+      .fn<PrivacyControlsRepository['clearCredentials']>()
+      .mockRejectedValueOnce(new Error('clear failed'))
+      .mockResolvedValueOnce();
+    const repository = {
+      clearAll: vi.fn<PrivacyControlsRepository['clearAll']>(),
+      clearCredentials,
+      getExportSnapshot: vi
+        .fn<PrivacyControlsRepository['getExportSnapshot']>()
+        .mockResolvedValue({ watchlist: [], settings: null, reports: [] }),
+    } satisfies PrivacyControlsRepository;
+    const onCredentialsClearStart = vi.fn();
+    const onCredentialsClearSuccess = vi.fn();
+    const onCredentialsClearFailure = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishFailureRecovery = resolve;
+        }),
+    );
+    render(
+      <PrivacyControls
+        repository={repository}
+        onCredentialsClearStart={onCredentialsClearStart}
+        onCredentialsClearSuccess={onCredentialsClearSuccess}
+        onCredentialsClearFailure={onCredentialsClearFailure}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '清除 AI 凭据' }));
+    await waitFor(() => expect(onCredentialsClearFailure).toHaveBeenCalledOnce());
+    expect(onCredentialsClearStart).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: '清除中…' })).toHaveProperty('disabled', true);
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    finishFailureRecovery();
+    await screen.findByRole('alert');
+    await user.click(screen.getByRole('button', { name: '重试上一次操作' }));
+    expect(await screen.findByText(/AI 凭据已清除/)).toBeVisible();
+    expect(onCredentialsClearStart).toHaveBeenCalledTimes(2);
+    expect(onCredentialsClearSuccess).toHaveBeenCalledOnce();
+  });
+
   it('removes the anchor immediately and revokes the Blob URL on the next task after download', () => {
     vi.useFakeTimers();
     const click = vi
@@ -217,5 +262,47 @@ describe('PrivacyControls', () => {
     ).toThrow('append failed');
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:tego-export');
     expect(document.querySelector('a[download]')).toBeNull();
+  });
+
+  it('revokes the Blob URL when DOM initialization fails after URL creation', () => {
+    const createObjectURL = vi.fn(() => 'blob:tego-export');
+    const revokeObjectURL = vi.fn();
+    vi.spyOn(document, 'createElement').mockImplementationOnce(() => {
+      throw new Error('create anchor failed');
+    });
+
+    expect(() =>
+      downloadLocalDataExport('{}\n', '2026-07-20T03:00:00.000Z', document, {
+        createObjectURL,
+        revokeObjectURL,
+      }),
+    ).toThrow('create anchor failed');
+    expect(revokeObjectURL).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:tego-export');
+  });
+
+  it('removes the partial anchor and revokes when anchor initialization throws', () => {
+    const createObjectURL = vi.fn(() => 'blob:tego-export');
+    const revokeObjectURL = vi.fn();
+    const remove = vi.fn();
+    const anchor = {
+      set href(_value: string) {
+        throw new Error('href initialization failed');
+      },
+      remove,
+    } as unknown as HTMLAnchorElement;
+    const documentReference = {
+      createElement: vi.fn(() => anchor),
+      body: { append: vi.fn() },
+    } as unknown as Document;
+
+    expect(() =>
+      downloadLocalDataExport('{}\n', '2026-07-20T03:00:00.000Z', documentReference, {
+        createObjectURL,
+        revokeObjectURL,
+      }),
+    ).toThrow('href initialization failed');
+    expect(remove).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:tego-export');
   });
 });

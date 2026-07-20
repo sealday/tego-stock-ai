@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,7 +15,7 @@ import AiReportWorkspace, {
 import { stockCode, type StockCode } from '../../src/domain/stock';
 import type { StockWorkspaceState } from '../../src/hooks/use-stock-workspace';
 import { deleteLocalDatabase } from '../../src/storage/database';
-import { LocalRepository } from '../../src/storage/repository';
+import { LocalRepository, type SavedReport } from '../../src/storage/repository';
 import { completeReport, draftReport } from '../fixtures/ai-report';
 
 const databases = new Set<string>();
@@ -85,6 +85,65 @@ describe('SavedReports', () => {
     expect(await screen.findByText('尚未保存本地 AI 报告。')).toBeVisible();
     expect(listReports).toHaveBeenCalledTimes(2);
   });
+
+  it('does not let an older manual retry overwrite a newer refresh', async () => {
+    const user = userEvent.setup();
+    let resolveRetry: (reports: readonly ReturnType<typeof savedReportFixture>[]) => void = () =>
+      undefined;
+    let resolveRefresh: (reports: readonly ReturnType<typeof savedReportFixture>[]) => void = () =>
+      undefined;
+    const retry = new Promise<readonly ReturnType<typeof savedReportFixture>[]>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const refresh = new Promise<readonly ReturnType<typeof savedReportFixture>[]>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const listReports = vi
+      .fn<SavedReportsRepository['listReports']>()
+      .mockRejectedValueOnce(new Error('initial read failed'))
+      .mockReturnValueOnce(retry)
+      .mockReturnValueOnce(refresh);
+    const repository = {
+      deleteReport: vi.fn<SavedReportsRepository['deleteReport']>(),
+      listReports,
+    } satisfies SavedReportsRepository;
+    const view = render(<SavedReports repository={repository} />);
+
+    await screen.findByRole('alert');
+    await user.click(screen.getByRole('button', { name: '重试读取本地报告' }));
+    view.rerender(<SavedReports repository={repository} refreshKey={1} />);
+    await waitFor(() => expect(listReports).toHaveBeenCalledTimes(3));
+
+    resolveRefresh([savedReportFixture()]);
+    expect(await screen.findByText('完整报告')).toBeVisible();
+    await act(async () => {
+      resolveRetry([]);
+      await retry;
+    });
+    expect(screen.getByText('完整报告')).toBeVisible();
+  });
+
+  it('blocks report deletion while the shared local write gate is closed', async () => {
+    const user = userEvent.setup();
+    const saved = {
+      id: 'complete-one',
+      savedAt: '2026-07-20T03:00:00.000Z',
+      report: completeReport(),
+    } as const;
+    const deleteReport = vi.fn<SavedReportsRepository['deleteReport']>().mockResolvedValue();
+    const repository = {
+      deleteReport,
+      listReports: vi.fn<SavedReportsRepository['listReports']>().mockResolvedValue([saved]),
+    } satisfies SavedReportsRepository;
+    render(<SavedReports repository={repository} disabled />);
+
+    const deleteButton = await screen.findByRole('button', {
+      name: '删除完整报告 贵州茅台 600519.SH',
+    });
+    expect(deleteButton).toHaveProperty('disabled', true);
+    await user.click(deleteButton);
+    expect(deleteReport).not.toHaveBeenCalled();
+  });
 });
 
 describe('AiReportWorkspace local hydration', () => {
@@ -152,6 +211,171 @@ describe('AiReportWorkspace local hydration', () => {
     );
     await repository.close();
   });
+
+  it('keeps settings blocked until a failed credential clear is authoritatively hydrated', async () => {
+    const user = userEvent.setup();
+    let resolveRecovery: (
+      value: Awaited<ReturnType<AiReportWorkspaceRepository['getSettings']>>,
+    ) => void = () => undefined;
+    const recovery = new Promise<Awaited<ReturnType<AiReportWorkspaceRepository['getSettings']>>>(
+      (resolve) => {
+        resolveRecovery = resolve;
+      },
+    );
+    const authoritativeSettings = {
+      baseUrl: 'https://provider.example/v1',
+      model: 'authoritative-model',
+      apiKey: 'authoritative-key',
+      rememberApiKey: true,
+    } as const;
+    const getSettings = vi
+      .fn<AiReportWorkspaceRepository['getSettings']>()
+      .mockResolvedValueOnce(authoritativeSettings)
+      .mockReturnValueOnce(recovery);
+    const saveSettings = vi.fn<AiReportWorkspaceRepository['saveSettings']>().mockResolvedValue();
+    const repository = workspaceRepository({
+      clearCredentials: vi
+        .fn<AiReportWorkspaceRepository['clearCredentials']>()
+        .mockRejectedValue(new Error('clear failed')),
+      getSettings,
+      saveSettings,
+    });
+    render(<AiReportWorkspace state={loadingWorkspaceState()} active repository={repository} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('API key')).toHaveProperty('value', 'authoritative-key'),
+    );
+    await user.click(screen.getByRole('button', { name: '清除 AI 凭据' }));
+    await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', true);
+    expect(screen.queryByText(/本地数据操作失败/)).toBeNull();
+
+    resolveRecovery(authoritativeSettings);
+    await screen.findByText(/本地数据操作失败/);
+    await waitFor(() =>
+      expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', false),
+    );
+    await user.type(screen.getByLabelText('模型标识符'), '-new');
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      ...authoritativeSettings,
+      model: 'authoritative-model-new',
+    });
+  });
+
+  it('closes the settings write gate synchronously while credential clearing is pending', async () => {
+    const user = userEvent.setup();
+    let finishClear: () => void = () => undefined;
+    const clearCredentials = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishClear = resolve;
+        }),
+    );
+    const storedSettings = {
+      baseUrl: 'https://provider.example/v1',
+      model: 'stored-model',
+      apiKey: 'stored-key',
+      rememberApiKey: true,
+    } as const;
+    const saveSettings = vi.fn<AiReportWorkspaceRepository['saveSettings']>().mockResolvedValue();
+    const repository = workspaceRepository({
+      clearCredentials,
+      getSettings: vi
+        .fn<AiReportWorkspaceRepository['getSettings']>()
+        .mockResolvedValue(storedSettings),
+      saveSettings,
+    });
+    render(<AiReportWorkspace state={loadingWorkspaceState()} active repository={repository} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('API key')).toHaveProperty('value', 'stored-key'),
+    );
+    await user.click(screen.getByRole('button', { name: '清除 AI 凭据' }));
+    expect(clearCredentials).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', true);
+    await user.type(screen.getByLabelText('模型标识符'), '-stale');
+    expect(saveSettings).not.toHaveBeenCalled();
+
+    finishClear();
+    await waitFor(() => expect(screen.getByLabelText('API key')).toHaveProperty('value', ''));
+    expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', false);
+    await user.type(screen.getByLabelText('模型标识符'), '-new');
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      ...storedSettings,
+      model: 'stored-model-new',
+      apiKey: '',
+      rememberApiKey: false,
+    });
+  });
+
+  it('keeps every local write blocked until failed full clearing rehydrates authoritative state', async () => {
+    const user = userEvent.setup();
+    let resolveSettingsRecovery: (
+      value: Awaited<ReturnType<AiReportWorkspaceRepository['getSettings']>>,
+    ) => void = () => undefined;
+    let resolveReportsRecovery: (
+      value: Awaited<ReturnType<AiReportWorkspaceRepository['listReports']>>,
+    ) => void = () => undefined;
+    const settingsRecovery = new Promise<
+      Awaited<ReturnType<AiReportWorkspaceRepository['getSettings']>>
+    >((resolve) => {
+      resolveSettingsRecovery = resolve;
+    });
+    const reportsRecovery = new Promise<
+      Awaited<ReturnType<AiReportWorkspaceRepository['listReports']>>
+    >((resolve) => {
+      resolveReportsRecovery = resolve;
+    });
+    const authoritativeSettings = {
+      baseUrl: 'https://provider.example/v1',
+      model: 'recovered-model',
+      apiKey: 'recovered-key',
+      rememberApiKey: true,
+    } as const;
+    const getSettings = vi
+      .fn<AiReportWorkspaceRepository['getSettings']>()
+      .mockResolvedValueOnce(authoritativeSettings)
+      .mockReturnValueOnce(settingsRecovery);
+    const listReports = vi
+      .fn<AiReportWorkspaceRepository['listReports']>()
+      .mockResolvedValueOnce([])
+      .mockReturnValueOnce(reportsRecovery)
+      .mockResolvedValue([]);
+    const saveSettings = vi.fn<AiReportWorkspaceRepository['saveSettings']>().mockResolvedValue();
+    const repository = workspaceRepository({
+      clearAll: vi
+        .fn<AiReportWorkspaceRepository['clearAll']>()
+        .mockRejectedValue(new Error('clear failed')),
+      getSettings,
+      listReports,
+      saveSettings,
+    });
+    render(<AiReportWorkspace state={loadingWorkspaceState()} active repository={repository} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('模型标识符')).toHaveProperty('value', 'recovered-model'),
+    );
+    await user.click(screen.getByRole('button', { name: '清除全部本地数据' }));
+    await user.click(screen.getByRole('button', { name: '确认清除全部数据' }));
+    await waitFor(() => {
+      expect(getSettings).toHaveBeenCalledTimes(2);
+      expect(listReports).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', true);
+    expect(screen.queryByText(/本地数据操作失败/)).toBeNull();
+
+    resolveSettingsRecovery(authoritativeSettings);
+    resolveReportsRecovery([]);
+    await screen.findByText(/本地数据操作失败/);
+    await waitFor(() =>
+      expect(screen.getByLabelText('模型标识符')).toHaveProperty('disabled', false),
+    );
+    await user.type(screen.getByLabelText('模型标识符'), '-new');
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      ...authoritativeSettings,
+      model: 'recovered-model-new',
+    });
+  });
 });
 
 function workspaceRepository(
@@ -172,6 +396,14 @@ function workspaceRepository(
     saveReport: vi.fn<AiReportWorkspaceRepository['saveReport']>(),
     saveSettings: vi.fn<AiReportWorkspaceRepository['saveSettings']>().mockResolvedValue(),
     ...overrides,
+  };
+}
+
+function savedReportFixture(): SavedReport {
+  return {
+    id: 'complete-one',
+    savedAt: '2026-07-20T03:00:00.000Z',
+    report: completeReport(),
   };
 }
 

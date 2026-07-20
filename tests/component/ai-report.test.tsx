@@ -250,12 +250,13 @@ describe('AiReportPanel', () => {
         { type: 'complete' },
       ]),
     );
-    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
+    const onSaveReport = vi.fn<(report: CompleteAiReport, generationEpoch: number) => void>();
     const { container } = render(
       <AiReportPanel
         context={reportContext()}
         settings={SETTINGS}
         stream={stream}
+        storageEpoch={7}
         onSaveReport={onSaveReport}
       />,
     );
@@ -285,6 +286,7 @@ describe('AiReportPanel', () => {
       rememberApiKey: false,
     });
     expect(JSON.stringify(saved)).not.toContain('sk-browser-secret');
+    expect(onSaveReport.mock.calls[0]?.[1]).toBe(7);
     expect(screen.getByText('完整报告已交给本地保存回调')).toBeVisible();
   });
 
@@ -335,7 +337,7 @@ describe('AiReportPanel', () => {
 
   it('cancels an active stream and hands off one non-saveable draft', async () => {
     const user = userEvent.setup();
-    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    const onDraftReport = vi.fn<(report: DraftAiReport, generationEpoch: number) => void>();
     const stream: AiReportStreamer = async function* (configuration) {
       yield { type: 'delta', text: '## 数据摘要与截止日期\n流式草稿内容。' };
       await new Promise<void>((resolve) => {
@@ -348,6 +350,7 @@ describe('AiReportPanel', () => {
         context={reportContext()}
         settings={SETTINGS}
         stream={stream}
+        storageEpoch={9}
         onDraftReport={onDraftReport}
       />,
     );
@@ -365,6 +368,7 @@ describe('AiReportPanel', () => {
       reason: 'cancelled',
       context: { stock: { code: '600519.SH' } },
     });
+    expect(onDraftReport.mock.calls[0]?.[1]).toBe(9);
   });
 
   it('finalizes a pending structural violation when the user cancels generation', async () => {

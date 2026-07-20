@@ -252,7 +252,7 @@ function Watchlist({
         <div className="terminal-watchlist__error" role={announce ? 'alert' : undefined}>
           <p>本地自选股操作失败，已保存数据未宣称更改。</p>
           {onRetry === undefined ? null : (
-            <button type="button" disabled={busy || disabled} onClick={onRetry}>
+            <button type="button" disabled={busy} onClick={onRetry}>
               重试本地自选股操作
             </button>
           )}

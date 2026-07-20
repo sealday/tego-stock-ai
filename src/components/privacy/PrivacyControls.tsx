@@ -14,23 +14,29 @@ export type PrivacyControlsRepository = Pick<
 
 export interface PrivacyControlsProps {
   readonly repository: PrivacyControlsRepository;
+  readonly disabled?: boolean | undefined;
   readonly now?: (() => Date) | undefined;
   readonly download?:
     | ((serialized: string, exportedAt: string) => void | Promise<void>)
     | undefined;
-  readonly onCredentialsCleared?: (() => void) | undefined;
+  readonly onCredentialsClearStart?: (() => void) | undefined;
+  readonly onCredentialsClearSuccess?: (() => void | Promise<void>) | undefined;
+  readonly onCredentialsClearFailure?: (() => void | Promise<void>) | undefined;
   readonly onAllClearStart?: (() => void) | undefined;
-  readonly onAllCleared?: (() => void) | undefined;
-  readonly onAllClearFailure?: (() => void) | undefined;
+  readonly onAllCleared?: (() => void | Promise<void>) | undefined;
+  readonly onAllClearFailure?: (() => void | Promise<void>) | undefined;
 }
 
 type PrivacyAction = 'export' | 'credentials' | 'all';
 
 export function PrivacyControls({
   repository,
+  disabled = false,
   now,
   download = downloadLocalDataExport,
-  onCredentialsCleared,
+  onCredentialsClearStart,
+  onCredentialsClearSuccess,
+  onCredentialsClearFailure,
   onAllClearStart,
   onAllCleared,
   onAllClearFailure,
@@ -54,12 +60,17 @@ export function PrivacyControls({
     openButton.current?.focus();
   };
 
-  const perform = async (action: PrivacyAction) => {
+  const perform = async (action: PrivacyAction, allowWhileDisabled = false) => {
+    if (disabled && !allowWhileDisabled) {
+      return;
+    }
     setBusy(action);
     setNotice(null);
     setFailedAction(null);
     if (action === 'all') {
       onAllClearStart?.();
+    } else if (action === 'credentials') {
+      onCredentialsClearStart?.();
     }
     try {
       if (action === 'export') {
@@ -70,18 +81,20 @@ export function PrivacyControls({
         setNotice('本地数据已导出。');
       } else if (action === 'credentials') {
         await repository.clearCredentials();
-        onCredentialsCleared?.();
+        await onCredentialsClearSuccess?.();
         setNotice('AI 凭据已清除；提供商地址、模型与报告均已保留。');
       } else {
         await repository.clearAll();
-        onAllCleared?.();
+        await onAllCleared?.();
         setNotice('全部本地数据已清除。');
       }
     } catch {
-      setFailedAction(action);
       if (action === 'all') {
-        onAllClearFailure?.();
+        await recoverSafely(onAllClearFailure);
+      } else if (action === 'credentials') {
+        await recoverSafely(onCredentialsClearFailure);
       }
+      setFailedAction(action);
     } finally {
       setBusy(null);
     }
@@ -107,17 +120,25 @@ export function PrivacyControls({
         只有明确勾选“在此设备上记住 API key”后才会持久化 key；导出文件永远排除 API key。
       </p>
       <div className="privacy-controls__actions">
-        <button type="button" disabled={busy !== null} onClick={() => void perform('export')}>
+        <button
+          type="button"
+          disabled={disabled || busy !== null}
+          onClick={() => void perform('export')}
+        >
           {busy === 'export' ? '导出中…' : '导出本地数据 JSON'}
         </button>
-        <button type="button" disabled={busy !== null} onClick={() => void perform('credentials')}>
+        <button
+          type="button"
+          disabled={disabled || busy !== null}
+          onClick={() => void perform('credentials')}
+        >
           {busy === 'credentials' ? '清除中…' : '清除 AI 凭据'}
         </button>
         <button
           ref={openButton}
           type="button"
           className="privacy-controls__danger"
-          disabled={busy !== null}
+          disabled={disabled || busy !== null}
           onClick={() => setConfirmationOpen(true)}
         >
           清除全部本地数据
@@ -132,7 +153,11 @@ export function PrivacyControls({
       {failedAction === null ? null : (
         <div className="local-storage-error" role="alert">
           <p>本地数据操作失败，未宣称成功且未显示内部存储细节。</p>
-          <button type="button" disabled={busy !== null} onClick={() => void perform(failedAction)}>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void perform(failedAction, true)}
+          >
             重试上一次操作
           </button>
         </div>
@@ -191,4 +216,12 @@ export function PrivacyControls({
       ) : null}
     </section>
   );
+}
+
+async function recoverSafely(recover: (() => void | Promise<void>) | undefined): Promise<void> {
+  try {
+    await recover?.();
+  } catch {
+    // The visible operation stays failed even when authoritative recovery also fails.
+  }
 }

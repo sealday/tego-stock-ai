@@ -31,8 +31,9 @@ export interface AiReportWorkspaceProps {
   readonly storageEpoch?: number | undefined;
   readonly storageClearing?: boolean | undefined;
   readonly onAllLocalClearStart?: (() => void) | undefined;
-  readonly onAllLocalClearSuccess?: (() => void) | undefined;
-  readonly onAllLocalClearFailure?: (() => void) | undefined;
+  readonly onAllLocalClearSuccess?: (() => void | Promise<void>) | undefined;
+  readonly onAllLocalClearFailure?: (() => void | Promise<void>) | undefined;
+  readonly onAllLocalClearRecoverySuccess?: (() => void | Promise<void>) | undefined;
 }
 
 export interface AiReportWorkspaceFocusRequest {
@@ -50,6 +51,7 @@ export default function AiReportWorkspace({
   onAllLocalClearStart,
   onAllLocalClearSuccess,
   onAllLocalClearFailure,
+  onAllLocalClearRecoverySuccess,
 }: AiReportWorkspaceProps) {
   const [defaultRepository] = useState(() => repository ?? new LocalRepository());
   const localRepository = repository ?? defaultRepository;
@@ -59,12 +61,16 @@ export default function AiReportWorkspace({
   const [storageError, setStorageError] = useState<string | null>(null);
   const [pendingDraft, setPendingDraft] = useState<PendingDraftSave | null>(null);
   const [localClearBusy, setLocalClearBusy] = useState(false);
+  const [credentialsClearBusy, setCredentialsClearBusy] = useState(false);
   const [workspaceEpoch, setWorkspaceEpoch] = useState(storageEpoch);
   const settingsRevision = useRef(0);
   const settingsWriteRevision = useRef(0);
   const operationEpoch = useRef(storageEpoch);
   const draftSaveAttempt = useRef(0);
+  const localWriteBlocked = useRef(storageClearing);
+  const settingsWriteBlocked = useRef(storageClearing);
   const clearing = storageClearing || localClearBusy;
+  const settingsDisabled = clearing || credentialsClearBusy;
   const context = createWorkspaceReportContext(state);
   const retainedContext = useRef(context);
   if (context !== null) {
@@ -89,60 +95,66 @@ export default function AiReportWorkspace({
   }, [storageEpoch]);
 
   const hydrateSettings = useCallback(
-    (replaceMissing: boolean) => {
-      let current = true;
+    async (replaceMissing: boolean, isCurrent?: () => boolean): Promise<boolean> => {
       const epoch = operationEpoch.current;
       const hydrationRevision = settingsRevision.current;
-      void localRepository
-        .getSettings()
-        .then((storedSettings) => {
-          if (
-            current &&
-            operationEpoch.current === epoch &&
-            settingsRevision.current === hydrationRevision
-          ) {
-            if (storedSettings !== null) {
-              setSettings(storedSettings);
-            } else if (replaceMissing) {
-              setSettings(DEFAULT_AI_PROVIDER_SETTINGS);
-            }
-            setStorageError(null);
+      try {
+        const storedSettings = await localRepository.getSettings();
+        if (
+          (isCurrent?.() ?? true) &&
+          operationEpoch.current === epoch &&
+          settingsRevision.current === hydrationRevision
+        ) {
+          if (storedSettings !== null) {
+            setSettings(storedSettings);
+          } else if (replaceMissing) {
+            setSettings(DEFAULT_AI_PROVIDER_SETTINGS);
           }
-        })
-        .catch(() => {
-          if (current && operationEpoch.current === epoch) {
-            setStorageError('无法读取本地 AI 设置；本次会话仍可继续使用。');
-          }
-        });
-      return () => {
-        current = false;
-      };
+          setStorageError(null);
+          return true;
+        }
+      } catch {
+        if (
+          (isCurrent?.() ?? true) &&
+          operationEpoch.current === epoch &&
+          settingsRevision.current === hydrationRevision
+        ) {
+          setStorageError('无法读取本地 AI 设置；本次会话仍可继续使用。');
+        }
+      }
+      return false;
     },
     [localRepository],
   );
 
-  useEffect(() => hydrateSettings(false), [hydrateSettings]);
+  useEffect(() => {
+    let current = true;
+    void hydrateSettings(false, () => current);
+    return () => {
+      current = false;
+    };
+  }, [hydrateSettings]);
 
-  const hydrateReports = useCallback(() => {
+  const hydrateReports = useCallback(async (): Promise<boolean> => {
     const epoch = operationEpoch.current;
-    void localRepository
-      .listReports()
-      .then((storedReports) => {
-        if (operationEpoch.current === epoch) {
-          setReports(storedReports.map((saved) => saved.report));
-          setPendingDraft(null);
-          setReportsRefreshKey((current) => current + 1);
-        }
-      })
-      .catch(() => {
-        if (operationEpoch.current === epoch) {
-          setStorageError('无法重新读取本地报告；请重试本地数据操作。');
-        }
-      });
+    try {
+      const storedReports = await localRepository.listReports();
+      if (operationEpoch.current === epoch) {
+        setReports(storedReports.map((saved) => saved.report));
+        setPendingDraft(null);
+        setReportsRefreshKey((current) => current + 1);
+        return true;
+      }
+    } catch {
+      if (operationEpoch.current === epoch) {
+        setStorageError('无法重新读取本地报告；请重试本地数据操作。');
+      }
+    }
+    return false;
   }, [localRepository]);
 
   const updateSettings = (next: AiProviderSettings) => {
-    if (clearing) {
+    if (localWriteBlocked.current || settingsWriteBlocked.current) {
       return;
     }
     settingsRevision.current += 1;
@@ -164,8 +176,11 @@ export default function AiReportWorkspace({
       });
   };
 
-  const persistCompleteReport = async (report: CompleteAiReport): Promise<void> => {
-    if (clearing) {
+  const persistCompleteReport = async (
+    report: CompleteAiReport,
+    generationEpoch: number,
+  ): Promise<void> => {
+    if (localWriteBlocked.current || generationEpoch !== operationEpoch.current) {
       throw new Error('Local storage is being cleared');
     }
     const epoch = operationEpoch.current;
@@ -184,14 +199,14 @@ export default function AiReportWorkspace({
     }
   };
 
-  const persistDraft = async (report: DraftAiReport): Promise<void> => {
-    if (clearing) {
+  const persistDraft = async (report: DraftAiReport, generationEpoch: number): Promise<void> => {
+    if (localWriteBlocked.current || generationEpoch !== operationEpoch.current) {
       return;
     }
     const epoch = operationEpoch.current;
     const attempt = draftSaveAttempt.current + 1;
     draftSaveAttempt.current = attempt;
-    setPendingDraft({ report, saving: true });
+    setPendingDraft({ report, generationEpoch, saving: true });
     try {
       await localRepository.saveReport(report);
       if (operationEpoch.current === epoch && draftSaveAttempt.current === attempt) {
@@ -201,23 +216,47 @@ export default function AiReportWorkspace({
       }
     } catch {
       if (operationEpoch.current === epoch && draftSaveAttempt.current === attempt) {
-        setPendingDraft({ report, saving: false });
+        setPendingDraft({ report, generationEpoch, saving: false });
         setStorageError(null);
       }
     }
   };
 
-  const retainDraft = (report: DraftAiReport) => {
+  const retainDraft = (report: DraftAiReport, generationEpoch: number) => {
+    if (localWriteBlocked.current || generationEpoch !== operationEpoch.current) {
+      return;
+    }
     setReports((currentReports) => retainOnce(currentReports, report));
-    void persistDraft(report);
+    void persistDraft(report, generationEpoch);
+  };
+
+  const credentialsClearStarted = () => {
+    settingsWriteBlocked.current = true;
+    settingsRevision.current += 1;
+    settingsWriteRevision.current += 1;
+    setCredentialsClearBusy(true);
+    setStorageError(null);
   };
 
   const credentialsCleared = () => {
     settingsRevision.current += 1;
+    settingsWriteRevision.current += 1;
     setSettings((current) => ({ ...current, apiKey: '', rememberApiKey: false }));
+    settingsWriteBlocked.current = localWriteBlocked.current;
+    setCredentialsClearBusy(false);
+  };
+
+  const credentialsClearFailed = async () => {
+    const recovered = await hydrateSettings(true);
+    if (recovered) {
+      settingsWriteBlocked.current = localWriteBlocked.current;
+      setCredentialsClearBusy(false);
+    }
   };
 
   const allLocalDataClearStarted = () => {
+    localWriteBlocked.current = true;
+    settingsWriteBlocked.current = true;
     operationEpoch.current += 1;
     setWorkspaceEpoch(operationEpoch.current);
     settingsRevision.current += 1;
@@ -228,7 +267,7 @@ export default function AiReportWorkspace({
     onAllLocalClearStart?.();
   };
 
-  const allLocalDataCleared = () => {
+  const allLocalDataCleared = async () => {
     settingsRevision.current += 1;
     settingsWriteRevision.current += 1;
     draftSaveAttempt.current += 1;
@@ -236,22 +275,33 @@ export default function AiReportWorkspace({
     setReports([]);
     setPendingDraft(null);
     setStorageError(null);
-    setLocalClearBusy(false);
     setReportsRefreshKey((current) => current + 1);
-    onAllLocalClearSuccess?.();
+    await onAllLocalClearSuccess?.();
+    localWriteBlocked.current = false;
+    settingsWriteBlocked.current = false;
+    setLocalClearBusy(false);
   };
 
-  const allLocalDataClearFailed = () => {
-    setLocalClearBusy(false);
-    hydrateSettings(true);
-    hydrateReports();
-    onAllLocalClearFailure?.();
+  const allLocalDataClearFailed = async () => {
+    const [settingsRecovered, reportsRecovered, parentRecovered] = await Promise.all([
+      hydrateSettings(true),
+      hydrateReports(),
+      recoverParent(onAllLocalClearFailure),
+    ]);
+    if (settingsRecovered && reportsRecovered && parentRecovered) {
+      const recoveryReleased = await recoverParent(onAllLocalClearRecoverySuccess);
+      if (recoveryReleased) {
+        localWriteBlocked.current = false;
+        settingsWriteBlocked.current = false;
+        setLocalClearBusy(false);
+      }
+    }
   };
 
   return (
     <div className="ai-report-workspace">
       {active ? (
-        <AiSettings value={settings} onChange={updateSettings} disabled={clearing} />
+        <AiSettings value={settings} onChange={updateSettings} disabled={settingsDisabled} />
       ) : null}
       {active && storageError !== null ? (
         <p className="local-storage-error" role="alert">
@@ -271,7 +321,7 @@ export default function AiReportWorkspace({
           context={reportContext}
           settings={settings}
           storageEpoch={workspaceEpoch}
-          storageDisabled={clearing}
+          storageDisabled={clearing || pendingDraft !== null}
           onSaveReport={persistCompleteReport}
           onDraftReport={retainDraft}
         />
@@ -290,18 +340,27 @@ export default function AiReportWorkspace({
             <button
               type="button"
               disabled={clearing}
-              onClick={() => void persistDraft(pendingDraft.report)}
+              onClick={() => void persistDraft(pendingDraft.report, pendingDraft.generationEpoch)}
             >
               重试保存未完成草稿
             </button>
           )}
         </div>
       ) : null}
-      {active ? <SavedReports repository={localRepository} refreshKey={reportsRefreshKey} /> : null}
+      {active ? (
+        <SavedReports
+          repository={localRepository}
+          refreshKey={reportsRefreshKey}
+          disabled={clearing}
+        />
+      ) : null}
       {active ? (
         <PrivacyControls
           repository={localRepository}
-          onCredentialsCleared={credentialsCleared}
+          disabled={clearing}
+          onCredentialsClearStart={credentialsClearStarted}
+          onCredentialsClearSuccess={credentialsCleared}
+          onCredentialsClearFailure={credentialsClearFailed}
           onAllClearStart={allLocalDataClearStarted}
           onAllCleared={allLocalDataCleared}
           onAllClearFailure={allLocalDataClearFailed}
@@ -313,7 +372,17 @@ export default function AiReportWorkspace({
 
 interface PendingDraftSave {
   readonly report: DraftAiReport;
+  readonly generationEpoch: number;
   readonly saving: boolean;
+}
+
+async function recoverParent(recover: (() => void | Promise<void>) | undefined): Promise<boolean> {
+  try {
+    await recover?.();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function retainOnce(

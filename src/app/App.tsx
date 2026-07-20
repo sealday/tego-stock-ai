@@ -48,30 +48,35 @@ export function App({ watchlistRepository }: AppProps = {}) {
   const hydrationRequest = useRef(0);
   const mutationRevision = useRef(0);
   const storageEpochReference = useRef(0);
+  const watchlistWriteBlocked = useRef(true);
   const asOf = toShanghaiIsoDate(new Date());
   const workspace = useStockWorkspace({ code: selectedStock.code, asOf });
 
-  const loadWatchlist = useCallback(() => {
-    const request = hydrationRequest.current + 1;
-    hydrationRequest.current = request;
-    const revision = mutationRevision.current;
-    const epoch = storageEpochReference.current;
-    setWatchlistLoading(true);
-    setFailedWatchlistAction(null);
-    void repository
-      .listWatchlist()
-      .then((storedWatchlist) => {
+  const loadWatchlist = useCallback(
+    async (releaseWriteGate = true): Promise<boolean> => {
+      const request = hydrationRequest.current + 1;
+      hydrationRequest.current = request;
+      const revision = mutationRevision.current;
+      const epoch = storageEpochReference.current;
+      watchlistWriteBlocked.current = true;
+      setWatchlistLoading(true);
+      setFailedWatchlistAction(null);
+      try {
+        const storedWatchlist = await repository.listWatchlist();
         if (
           mounted.current &&
           hydrationRequest.current === request &&
           mutationRevision.current === revision &&
           storageEpochReference.current === epoch
         ) {
+          if (releaseWriteGate) {
+            watchlistWriteBlocked.current = false;
+          }
           setWatchlist(storedWatchlist);
           setWatchlistNotice(null);
+          return true;
         }
-      })
-      .catch(() => {
+      } catch {
         if (
           mounted.current &&
           hydrationRequest.current === request &&
@@ -80,8 +85,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
         ) {
           setFailedWatchlistAction({ type: 'load' });
         }
-      })
-      .finally(() => {
+      } finally {
         if (
           mounted.current &&
           hydrationRequest.current === request &&
@@ -90,19 +94,22 @@ export function App({ watchlistRepository }: AppProps = {}) {
         ) {
           setWatchlistLoading(false);
         }
-      });
-  }, [repository]);
+      }
+      return false;
+    },
+    [repository],
+  );
 
   useEffect(() => {
     mounted.current = true;
-    loadWatchlist();
+    void loadWatchlist();
     return () => {
       mounted.current = false;
     };
   }, [loadWatchlist]);
 
   const addToWatchlist = async (stock: StockSearchResult) => {
-    if (watchlistLoading || storageClearing) {
+    if (watchlistWriteBlocked.current || storageClearing) {
       return;
     }
     mutationRevision.current += 1;
@@ -127,7 +134,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
   };
 
   const removeFromWatchlist = async (stock: StockSearchResult) => {
-    if (watchlistLoading || storageClearing) {
+    if (watchlistWriteBlocked.current || storageClearing) {
       return;
     }
     mutationRevision.current += 1;
@@ -157,7 +164,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
     } else if (failedWatchlistAction?.type === 'remove') {
       void removeFromWatchlist(failedWatchlistAction.stock);
     } else {
-      loadWatchlist();
+      void loadWatchlist();
     }
   };
 
@@ -165,6 +172,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
     storageEpochReference.current += 1;
     mutationRevision.current += 1;
     hydrationRequest.current += 1;
+    watchlistWriteBlocked.current = true;
     setStorageEpoch(storageEpochReference.current);
     setStorageClearing(true);
     setWatchlistBusy(false);
@@ -173,15 +181,23 @@ export function App({ watchlistRepository }: AppProps = {}) {
   };
 
   const allLocalClearSucceeded = () => {
+    watchlistWriteBlocked.current = false;
     setWatchlist([]);
     setWatchlistLoading(false);
     setStorageClearing(false);
     setWatchlistNotice('当前浏览器的本地自选股已清空。');
   };
 
-  const allLocalClearFailed = () => {
+  const allLocalClearFailed = async () => {
+    const recovered = await loadWatchlist(false);
+    if (!recovered) {
+      throw new Error('Authoritative watchlist recovery failed');
+    }
+  };
+
+  const allLocalClearRecoverySucceeded = () => {
+    watchlistWriteBlocked.current = false;
     setStorageClearing(false);
-    loadWatchlist();
   };
 
   return (
@@ -202,7 +218,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
       watchlist={watchlist}
       watchlistLoading={watchlistLoading}
       watchlistBusy={watchlistBusy}
-      watchlistDisabled={watchlistLoading || storageClearing}
+      watchlistDisabled={watchlistLoading || storageClearing || watchlistWriteBlocked.current}
       watchlistNotice={watchlistNotice}
       watchlistError={failedWatchlistAction !== null}
       onWatchlistAdd={(stock) => void addToWatchlist(stock)}
@@ -219,6 +235,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
         onAllLocalClearStart={allLocalClearStarted}
         onAllLocalClearSuccess={allLocalClearSucceeded}
         onAllLocalClearFailure={allLocalClearFailed}
+        onAllLocalClearRecoverySuccess={allLocalClearRecoverySucceeded}
       />
     </TerminalShell>
   );

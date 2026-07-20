@@ -49,8 +49,11 @@ export interface AiReportPanelProps {
   readonly storageEpoch?: number;
   readonly storageDisabled?: boolean;
   readonly stream?: AiReportStreamer;
-  readonly onSaveReport?: (report: CompleteAiReport) => void | Promise<void>;
-  readonly onDraftReport?: (report: DraftAiReport) => void | Promise<void>;
+  readonly onSaveReport?: (
+    report: CompleteAiReport,
+    generationEpoch: number,
+  ) => void | Promise<void>;
+  readonly onDraftReport?: (report: DraftAiReport, generationEpoch: number) => void | Promise<void>;
   readonly now?: () => Date;
 }
 
@@ -80,6 +83,7 @@ export function AiReportPanel({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [draftReason, setDraftReason] = useState<string | null>(null);
   const [completeReport, setCompleteReport] = useState<CompleteAiReport | null>(null);
+  const [completeReportEpoch, setCompleteReportEpoch] = useState(storageEpoch);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'failed' | 'saved'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const activeController = useRef<AbortController | null>(null);
@@ -117,6 +121,7 @@ export function AiReportPanel({
     setErrorMessage(null);
     setDraftReason(null);
     setCompleteReport(null);
+    setCompleteReportEpoch(storageEpoch);
     saveAttemptId.current += 1;
     saveInFlight.current = false;
     setSaveState('idle');
@@ -140,6 +145,7 @@ export function AiReportPanel({
     activeController.current?.abort();
     const controller = new AbortController();
     const requestId = generationId.current + 1;
+    const generationEpoch = storageEpoch;
     generationId.current = requestId;
     activeController.current = controller;
     activeGeneration.current = {
@@ -147,6 +153,7 @@ export function AiReportPanel({
       controller,
       context: generationContext,
       settings,
+      generationEpoch,
       rawText: '',
       draftDelivered: false,
     };
@@ -178,6 +185,7 @@ export function AiReportPanel({
       },
       onComplete: (report) => {
         setCompleteReport(report);
+        setCompleteReportEpoch(generationEpoch);
         setVisibleSections(report.sections);
         setPhase('complete');
       },
@@ -185,7 +193,7 @@ export function AiReportPanel({
         const currentGeneration = activeGeneration.current;
         if (currentGeneration?.requestId === requestId && !currentGeneration.draftDelivered) {
           currentGeneration.draftDelivered = true;
-          onDraftReport?.(report);
+          onDraftReport?.(report, generationEpoch);
         }
         setVisibleSections(report.sections);
         setDraftReason(reasonLabel);
@@ -230,7 +238,7 @@ export function AiReportPanel({
     });
     if (!currentGeneration.draftDelivered) {
       currentGeneration.draftDelivered = true;
-      onDraftReport?.(draft);
+      onDraftReport?.(draft, currentGeneration.generationEpoch);
     }
     activeGeneration.current = null;
     setVisibleSections(draft.sections);
@@ -254,7 +262,7 @@ export function AiReportPanel({
     setSaveState('saving');
     setSaveError(null);
     try {
-      await onSaveReport(completeReport);
+      await onSaveReport(completeReport, completeReportEpoch);
       if (saveAttemptId.current === attemptId) {
         setSaveState('saved');
       }
@@ -596,6 +604,7 @@ interface ActiveGeneration {
   readonly controller: AbortController;
   readonly context: ReportContext;
   readonly settings: AiProviderSettings;
+  readonly generationEpoch: number;
   rawText: string;
   draftDelivered: boolean;
 }

@@ -445,17 +445,15 @@ describe('StockWorkspace', () => {
 
   it('keeps a failed draft auto-save in the session and retries it without duplication', async () => {
     const partialReport = '## 数据摘要与截止日期\n待重试草稿。';
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        Promise.resolve(
-          new Response(
-            `data: ${JSON.stringify({ choices: [{ delta: { content: partialReport } }] })}\n\n`,
-            { status: 200, headers: { 'content-type': 'text/event-stream' } },
-          ),
+    const fetchClient = vi.fn(async () =>
+      Promise.resolve(
+        new Response(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: partialReport } }] })}\n\n`,
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
         ),
       ),
     );
+    vi.stubGlobal('fetch', fetchClient);
     const saveReport = vi
       .fn<AiReportWorkspaceRepository['saveReport']>()
       .mockRejectedValueOnce(new Error('IndexedDB internals'))
@@ -482,13 +480,23 @@ describe('StockWorkspace', () => {
     expect(alert.textContent).toContain('草稿尚未保存到当前浏览器');
     expect(alert.textContent).not.toContain('IndexedDB');
     expect(screen.getByText('当前页面会话已保留 1 份完整报告或未完成草稿。')).toBeVisible();
+    const retryGeneration = screen.getByRole('button', { name: '仅重试 AI 生成' });
+    expect(retryGeneration).toHaveProperty('disabled', true);
+    fireEvent.click(retryGeneration);
+    expect(fetchClient).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole('button', { name: '重试保存未完成草稿' }));
 
     await waitFor(() => expect(saveReport).toHaveBeenCalledTimes(2));
+    expect(saveReport.mock.calls[1]?.[0]).toBe(saveReport.mock.calls[0]?.[0]);
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: '重试保存未完成草稿' })).toBeNull(),
     );
     expect(screen.getByText('当前页面会话已保留 1 份完整报告或未完成草稿。')).toBeVisible();
+    expect(retryGeneration).toHaveProperty('disabled', false);
+    fireEvent.click(retryGeneration);
+    await waitFor(() => expect(fetchClient).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(saveReport).toHaveBeenCalledTimes(3));
+    expect(saveReport.mock.calls[2]?.[0]).not.toBe(saveReport.mock.calls[0]?.[0]);
   });
 
   it('keeps an in-flight report mounted across a non-null to null to non-null context transition', async () => {
