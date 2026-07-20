@@ -10,6 +10,8 @@ if (currentPlatform !== visualReferencePlatform) {
       'Run browser smoke tests here and move visual comparison to the configured baseline runner.',
   );
 }
+const port = resolvePlaywrightPort();
+const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: './tests/browser',
@@ -28,12 +30,12 @@ export default defineConfig({
     toHaveScreenshot: {
       animations: 'disabled',
       caret: 'hide',
-      maxDiffPixelRatio: 0.02,
+      maxDiffPixelRatio: 0.001,
       scale: 'css',
     },
   },
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL,
     colorScheme: 'dark',
     contextOptions: { reducedMotion: 'reduce' },
     locale: 'zh-CN',
@@ -53,8 +55,20 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run build && npm run preview -- --host 127.0.0.1 --port 4173',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
+    command: `npm run build && npm run preview -- --host 127.0.0.1 --port ${port}`,
+    url: baseURL,
+    reuseExistingServer: false,
   },
 });
+
+function resolvePlaywrightPort(): number {
+  const configured = process.env.PLAYWRIGHT_PORT;
+  const candidate = configured === undefined ? 30_000 + (process.pid % 20_000) : Number(configured);
+  if (!Number.isInteger(candidate) || candidate < 1024 || candidate > 65_535) {
+    throw new Error(
+      `PLAYWRIGHT_PORT must be an integer from 1024 through 65535; received ${configured}`,
+    );
+  }
+  process.env.PLAYWRIGHT_PORT = String(candidate);
+  return candidate;
+}

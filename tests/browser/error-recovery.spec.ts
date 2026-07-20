@@ -2,6 +2,7 @@ import { expect } from '@playwright/test';
 
 import {
   FIXTURE_AI_KEY,
+  FIXTURE_AI_MODEL,
   MISSING_PE_REASON,
   MISSING_REVENUE_REASON,
   configureFixtureAi,
@@ -70,11 +71,14 @@ test('retries only the AI request after an invalid provider response', async ({
   await page.getByRole('button', { name: '生成 AI 报告' }).click();
   await expect(page.getByText('AI 生成失败', { exact: true })).toBeVisible();
   await expect(page.getByText('AI 服务返回了无效的流式响应。')).toBeVisible();
+  const marketRequestsBeforeRetry = await probe.marketApiRequestCount();
+  expect(marketRequestsBeforeRetry).toBeGreaterThan(0);
   await page.getByRole('button', { name: '仅重试 AI 生成' }).click();
   await expect(page.getByText('报告已完成', { exact: true })).toBeVisible();
 
   expect(probe.aiAttempts()).toBe(2);
-  expect(probe.apiRequestsWithAuthorization()).toEqual([]);
+  expect(await probe.marketApiRequestCount()).toBe(marketRequestsBeforeRetry);
+  expect(await probe.apiRequestsWithAuthorization()).toEqual([]);
   assertCleanBrowser(probe);
 });
 
@@ -99,7 +103,7 @@ test('persists an explicitly incomplete draft after an interrupted provider stre
   await expect(page.getByText('未完成草稿', { exact: true })).toBeVisible();
   await expect(page.getByText('贵州茅台 600519.SH')).toBeVisible();
 
-  expect(probe.apiRequestsWithAuthorization()).toEqual([]);
+  expect(await probe.apiRequestsWithAuthorization()).toEqual([]);
   expect(probe.consoleMessages.join('\n')).not.toContain(FIXTURE_AI_KEY);
   assertCleanBrowser(probe);
 });
@@ -107,4 +111,69 @@ test('persists an explicitly incomplete draft after an interrupted provider stre
 function assertCleanBrowser(probe: FixtureProbe): void {
   expect(probe.consoleErrors).toEqual([]);
   expect(probe.pageErrors).toEqual([]);
+}
+
+test('rejects malformed provider requests before opening an SSE stream', async ({
+  installFixtureRoutes,
+}) => {
+  const probe = await installFixtureRoutes();
+  const validBody = {
+    model: FIXTURE_AI_MODEL,
+    stream: true,
+    messages: [{ role: 'user', content: '600519.SH · 2026-07-17 · Tushare Pro' }],
+  };
+  const cases = [
+    { authorization: 'Bearer wrong-key', body: JSON.stringify(validBody) },
+    { contentType: 'text/plain', body: JSON.stringify(validBody) },
+    { body: '{malformed' },
+    { body: '[]' },
+    { body: JSON.stringify({ ...validBody, model: 'wrong-model' }) },
+    { body: JSON.stringify({ ...validBody, stream: false }) },
+    { body: JSON.stringify({ ...validBody, messages: [{ role: 'tool', content: 'invalid' }] }) },
+    {
+      body: JSON.stringify({
+        ...validBody,
+        messages: [{ role: 'user', content: 'missing research context' }],
+      }),
+    },
+  ];
+  const results = [];
+  for (const fixtureCase of cases) {
+    const response = await fetch(probe.aiEndpoint, {
+      method: 'POST',
+      headers: {
+        authorization: fixtureCase.authorization ?? `Bearer ${FIXTURE_AI_KEY}`,
+        'content-type': fixtureCase.contentType ?? 'application/json',
+        origin: probe.previewOrigin,
+      },
+      body: fixtureCase.body,
+    });
+    results.push({
+      status: response.status,
+      contentType: response.headers.get('content-type'),
+      body: await response.text(),
+    });
+  }
+
+  expect(results).toEqual([
+    responseFailure(401, 'invalid-authorization'),
+    responseFailure(415, 'invalid-content-type'),
+    responseFailure(400, 'invalid-json'),
+    responseFailure(422, 'invalid-request'),
+    responseFailure(422, 'invalid-request'),
+    responseFailure(422, 'invalid-request'),
+    responseFailure(422, 'invalid-request'),
+    responseFailure(422, 'invalid-request'),
+  ]);
+  expect(probe.aiAttempts()).toBe(0);
+  expect(probe.consoleErrors).toEqual([]);
+  expect(probe.pageErrors).toEqual([]);
+});
+
+function responseFailure(status: number, error: string) {
+  return {
+    status,
+    contentType: 'application/json; charset=utf-8',
+    body: JSON.stringify({ error }),
+  };
 }

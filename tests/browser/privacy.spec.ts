@@ -37,12 +37,32 @@ test('keeps credentials, reports, watchlist, export and deletion local to this b
   const downloadPath = await download.path();
   expect(downloadPath).not.toBeNull();
   const exported = await readFile(downloadPath ?? '', 'utf8');
+  const exportedData: unknown = JSON.parse(exported);
+  expect(exportedData).toMatchObject({
+    schema: 'tego-stock-ai-local-export',
+    version: 1,
+    watchlist: [{ code: '600519.SH', name: '贵州茅台', pinyinAbbreviation: 'GZMT' }],
+    settings: { model: FIXTURE_AI_MODEL, rememberApiKey: true },
+    reports: [{ report: { status: 'complete' } }],
+  });
+  assertExportContainsNoCredential(exportedData);
   expect(exported).not.toContain(FIXTURE_AI_KEY);
   expect(exported).toContain(FIXTURE_AI_MODEL);
   expect(exported).toContain('600519.SH');
   expect(exported).toContain('"status": "complete"');
   await assertKeyAbsentFromRenderedDocument(page);
 
+  await page.reload();
+  await waitForFixtureWorkspace(page);
+  await expect(page.getByRole('button', { name: '选择贵州茅台 600519.SH' })).toBeVisible();
+  await page.getByRole('link', { name: 'AI 设置' }).click();
+  await expect(page.getByLabel('API key', { exact: true })).toHaveValue(FIXTURE_AI_KEY);
+  await expect(page.getByLabel('在此设备上记住 API key')).toBeChecked();
+  await expect(page.getByLabel('模型标识符')).toHaveValue(FIXTURE_AI_MODEL);
+  await expect(page.locator('.saved-reports__count')).toHaveText('1 份');
+  await assertKeyAbsentFromRenderedDocument(page);
+
+  await page.getByRole('link', { name: '本地隐私' }).click();
   await page.getByRole('button', { name: '清除 AI 凭据' }).click();
   await expect(page.getByText(/AI 凭据已清除/)).toBeVisible();
   await page.reload();
@@ -71,7 +91,7 @@ test('keeps credentials, reports, watchlist, export and deletion local to this b
   await expect(page.getByText('尚未保存本地 AI 报告。')).toBeVisible();
 
   await assertKeyAbsentFromRenderedDocument(page);
-  expect(probe.apiRequestsWithAuthorization()).toEqual([]);
+  expect(await probe.apiRequestsWithAuthorization()).toEqual([]);
   expect(probe.consoleMessages.join('\n')).not.toContain(FIXTURE_AI_KEY);
   expect(probe.consoleErrors).toEqual([]);
   expect(probe.pageErrors).toEqual([]);
@@ -86,4 +106,24 @@ async function assertKeyAbsentFromRenderedDocument(page: Page) {
   expect(html.replace(passwordMarkup, '<input id="ai-api-key" type="password">')).not.toContain(
     FIXTURE_AI_KEY,
   );
+}
+
+function assertExportContainsNoCredential(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertExportContainsNoCredential(item);
+    }
+    return;
+  }
+  if (typeof value !== 'object' || value === null) {
+    if (typeof value === 'string') {
+      expect(value).not.toContain(FIXTURE_AI_KEY);
+    }
+    return;
+  }
+  for (const [key, nestedValue] of Object.entries(value)) {
+    expect(key.toLowerCase()).not.toBe('apikey');
+    expect(key.toLowerCase()).not.toContain('secret');
+    assertExportContainsNoCredential(nestedValue);
+  }
 }

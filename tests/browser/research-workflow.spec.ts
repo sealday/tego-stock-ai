@@ -22,6 +22,7 @@ test('completes browser-only A-share research and reloads the saved report local
   await expect(result).toBeVisible();
   await result.click();
   await waitForFixtureWorkspace(page);
+  expect(new URL(page.url()).origin).toBe(probe.previewOrigin);
 
   await expect(page.getByText('Tushare Pro', { exact: true }).first()).toBeVisible();
   await expect(page.getByText(FIXTURE_CUTOFF, { exact: true }).first()).toBeVisible();
@@ -76,7 +77,7 @@ test('completes browser-only A-share research and reloads the saved report local
   await page.getByText('查看报告内容').click();
   await expect(page.getByText(/来源为 Tushare Pro 日线收盘数据/)).toBeVisible();
 
-  expect(probe.apiRequestsWithAuthorization()).toEqual([]);
+  expect(await probe.apiRequestsWithAuthorization()).toEqual([]);
   const aiRequests = probe.aiRequests();
   expect(aiRequests.some((request) => request.method === 'OPTIONS')).toBe(true);
   const postRequests = aiRequests.filter((request) => request.method === 'POST');

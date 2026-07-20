@@ -15,7 +15,6 @@ export const FIXTURE_AI_KEY = 'browser-fixture-key-do-not-log';
 export const MISSING_REVENUE_REASON = '当前报告期未披露营收增长';
 export const MISSING_PE_REASON = '当前权限未返回市盈率';
 
-const PREVIEW_ORIGIN = 'http://127.0.0.1:4173';
 const STREAM_STEP_DELAY_MS = 300;
 
 export type MarketFixtureMode = 'fresh' | 'stale' | 'missing-financials';
@@ -30,19 +29,22 @@ export interface FixtureRequestRecord {
   readonly url: string;
   readonly method: string;
   readonly authorization: string | undefined;
+  readonly headers: Readonly<Record<string, string>>;
   readonly postData: string | null;
 }
 
 export interface FixtureProbe {
+  readonly previewOrigin: string;
   readonly aiBaseUrl: string;
   readonly aiEndpoint: string;
-  readonly requests: readonly FixtureRequestRecord[];
   readonly consoleMessages: readonly string[];
   readonly consoleErrors: readonly string[];
   readonly pageErrors: readonly string[];
   aiAttempts(): number;
   aiRequests(): readonly FixtureRequestRecord[];
-  apiRequestsWithAuthorization(): readonly FixtureRequestRecord[];
+  browserRequests(): Promise<readonly FixtureRequestRecord[]>;
+  marketApiRequestCount(): Promise<number>;
+  apiRequestsWithAuthorization(): Promise<readonly FixtureRequestRecord[]>;
 }
 
 interface ManagedFixtureProbe extends FixtureProbe {
@@ -54,11 +56,15 @@ interface BrowserFixtures {
 }
 
 export const test = base.extend<BrowserFixtures>({
-  installFixtureRoutes: async ({ page }, provide) => {
+  installFixtureRoutes: async ({ page, baseURL }, provide) => {
+    if (baseURL === undefined) {
+      throw new Error('Browser fixture routes require a configured Playwright baseURL');
+    }
+    const previewOrigin = new URL(baseURL).origin;
     const activeFixtures: ManagedFixtureProbe[] = [];
     try {
       await provide(async (options = {}) => {
-        const fixture = await createFixtureRoutes(page, options);
+        const fixture = await createFixtureRoutes(page, previewOrigin, options);
         activeFixtures.push(fixture);
         return fixture;
       });
@@ -70,17 +76,22 @@ export const test = base.extend<BrowserFixtures>({
 
 async function createFixtureRoutes(
   page: Page,
+  previewOrigin: string,
   options: FixtureRouteOptions = {},
 ): Promise<ManagedFixtureProbe> {
   const marketMode = options.market ?? 'fresh';
   const aiMode = options.ai ?? 'complete';
-  const requests: FixtureRequestRecord[] = [];
+  const requestRecords: Promise<FixtureRequestRecord>[] = [];
   const consoleMessages: string[] = [];
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
-  const aiServer = await startAiFixtureServer(aiMode);
+  const aiServer = await startAiFixtureServer(aiMode, previewOrigin);
 
-  page.on('request', (request) => requests.push(recordRequest(request)));
+  page.on('request', (request) => {
+    const record = recordRequest(request);
+    requestRecords.push(record);
+    void record.catch(() => undefined);
+  });
   page.on('console', (message) => {
     consoleMessages.push(message.text());
     if (message.type() === 'error') {
@@ -90,49 +101,63 @@ async function createFixtureRoutes(
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   try {
-    await installMarketFixtureRoutes(page, marketMode);
+    await installMarketFixtureRoutes(page, previewOrigin, marketMode);
   } catch (error: unknown) {
     await aiServer.close();
     throw error;
   }
 
   return {
+    previewOrigin,
     aiBaseUrl: aiServer.baseUrl,
     aiEndpoint: aiServer.endpoint,
-    requests,
     consoleMessages,
     consoleErrors,
     pageErrors,
     aiAttempts: () => aiServer.attempts(),
     aiRequests: () => aiServer.requests,
-    apiRequestsWithAuthorization: () =>
-      requests.filter(
-        (request) => request.url.includes('/api/') && request.authorization !== undefined,
+    browserRequests: async () => Promise.all(requestRecords),
+    marketApiRequestCount: async () =>
+      (await Promise.all(requestRecords)).filter((request) =>
+        request.url.startsWith(`${previewOrigin}/api/`),
+      ).length,
+    apiRequestsWithAuthorization: async () =>
+      (await Promise.all(requestRecords)).filter(
+        (request) =>
+          request.url.startsWith(`${previewOrigin}/api/`) && request.authorization !== undefined,
       ),
-    close: aiServer.close,
+    close: async () => {
+      try {
+        await Promise.all(requestRecords);
+      } finally {
+        await aiServer.close();
+      }
+    },
   };
 }
 
 async function installMarketFixtureRoutes(
   page: Page,
+  previewOrigin: string,
   marketMode: MarketFixtureMode,
 ): Promise<void> {
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\/stocks\/search\?.+$/, (route) =>
+  const escapedOrigin = escapeRegExp(previewOrigin);
+  await page.route(new RegExp(`^${escapedOrigin}/api/stocks/search\\?.+$`), (route) =>
     fulfillJson(route, marketEnvelope([FIXTURE_STOCK], marketMode)),
   );
   await page.route(
-    /^http:\/\/127\.0\.0\.1:4173\/api\/stocks\/600519\.SH\/overview(?:\?.*)?$/,
+    new RegExp(`^${escapedOrigin}/api/stocks/600519\\.SH/overview(?:\\?.*)?$`),
     (route) => fulfillJson(route, overviewEnvelope(marketMode)),
   );
   await page.route(
-    /^http:\/\/127\.0\.0\.1:4173\/api\/stocks\/600519\.SH\/history(?:\?.*)?$/,
+    new RegExp(`^${escapedOrigin}/api/stocks/600519\\.SH/history(?:\\?.*)?$`),
     (route) => fulfillJson(route, historyEnvelope(marketMode)),
   );
   await page.route(
-    /^http:\/\/127\.0\.0\.1:4173\/api\/stocks\/600519\.SH\/fundamentals(?:\?.*)?$/,
+    new RegExp(`^${escapedOrigin}/api/stocks/600519\\.SH/fundamentals(?:\\?.*)?$`),
     (route) => fulfillJson(route, fundamentalsEnvelope(marketMode)),
   );
-  await page.route(/^http:\/\/127\.0\.0\.1:4173\/api\/market\/status(?:\?.*)?$/, (route) =>
+  await page.route(new RegExp(`^${escapedOrigin}/api/market/status(?:\\?.*)?$`), (route) =>
     fulfillJson(route, marketStatusEnvelope(marketMode)),
   );
 }
@@ -165,7 +190,10 @@ interface AiServerFixture {
   close(): Promise<void>;
 }
 
-async function startAiFixtureServer(mode: AiFixtureMode): Promise<AiServerFixture> {
+async function startAiFixtureServer(
+  mode: AiFixtureMode,
+  previewOrigin: string,
+): Promise<AiServerFixture> {
   const requests: FixtureRequestRecord[] = [];
   const streamAbort = new AbortController();
   let attempts = 0;
@@ -177,6 +205,7 @@ async function startAiFixtureServer(mode: AiFixtureMode): Promise<AiServerFixtur
       response,
       mode,
       origin,
+      previewOrigin,
       requests,
       signal: streamAbort.signal,
       nextAttempt: () => {
@@ -220,6 +249,7 @@ async function handleAiFixtureRequest({
   response,
   mode,
   origin,
+  previewOrigin,
   requests,
   signal,
   nextAttempt,
@@ -228,6 +258,7 @@ async function handleAiFixtureRequest({
   readonly response: ServerResponse;
   readonly mode: AiFixtureMode;
   readonly origin: string;
+  readonly previewOrigin: string;
   readonly requests: FixtureRequestRecord[];
   readonly signal: AbortSignal;
   readonly nextAttempt: () => number;
@@ -238,10 +269,11 @@ async function handleAiFixtureRequest({
     url: requestUrl.toString(),
     method: request.method ?? 'UNKNOWN',
     authorization: firstHeader(request.headers.authorization),
+    headers: normalizeNodeHeaders(request),
     postData: postData.length === 0 ? null : postData,
   });
 
-  if (request.headers.origin !== PREVIEW_ORIGIN) {
+  if (request.headers.origin !== previewOrigin) {
     response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
     response.end('Unexpected browser origin');
     return;
@@ -250,7 +282,7 @@ async function handleAiFixtureRequest({
   const corsHeaders = {
     'access-control-allow-headers': 'authorization, content-type',
     'access-control-allow-methods': 'OPTIONS, POST',
-    'access-control-allow-origin': PREVIEW_ORIGIN,
+    'access-control-allow-origin': previewOrigin,
     vary: 'Origin',
   } as const;
 
@@ -263,6 +295,29 @@ async function handleAiFixtureRequest({
   if (request.method !== 'POST' || requestUrl.pathname !== '/v1/chat/completions') {
     response.writeHead(404, { ...corsHeaders, 'content-type': 'text/plain; charset=utf-8' });
     response.end('Not found');
+    return;
+  }
+
+  if (firstHeader(request.headers.authorization) !== `Bearer ${FIXTURE_AI_KEY}`) {
+    rejectAiFixtureRequest(response, corsHeaders, 401, 'invalid-authorization');
+    return;
+  }
+  if (
+    firstHeader(request.headers['content-type'])?.split(';', 1)[0]?.trim() !== 'application/json'
+  ) {
+    rejectAiFixtureRequest(response, corsHeaders, 415, 'invalid-content-type');
+    return;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(postData);
+  } catch {
+    rejectAiFixtureRequest(response, corsHeaders, 400, 'invalid-json');
+    return;
+  }
+  if (!isValidAiFixtureBody(body)) {
+    rejectAiFixtureRequest(response, corsHeaders, 422, 'invalid-request');
     return;
   }
 
@@ -305,8 +360,63 @@ async function handleAiFixtureRequest({
   response.end();
 }
 
+function rejectAiFixtureRequest(
+  response: ServerResponse,
+  corsHeaders: Readonly<Record<string, string>>,
+  status: number,
+  error: string,
+): void {
+  response.writeHead(status, {
+    ...corsHeaders,
+    'cache-control': 'no-store',
+    'content-type': 'application/json; charset=utf-8',
+  });
+  response.end(JSON.stringify({ error }));
+}
+
+function isValidAiFixtureBody(value: unknown): boolean {
+  if (!isRecord(value) || value.model !== FIXTURE_AI_MODEL || value.stream !== true) {
+    return false;
+  }
+  if (!Array.isArray(value.messages) || value.messages.length === 0) {
+    return false;
+  }
+
+  const content: string[] = [];
+  for (const message of value.messages) {
+    if (
+      !isRecord(message) ||
+      !isMessageRole(message.role) ||
+      typeof message.content !== 'string' ||
+      message.content.trim().length === 0
+    ) {
+      return false;
+    }
+    content.push(message.content);
+  }
+
+  const context = content.join('\n');
+  return ['600519.SH', FIXTURE_CUTOFF, 'Tushare'].every((marker) => context.includes(marker));
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isMessageRole(value: unknown): value is 'system' | 'user' | 'assistant' {
+  return value === 'system' || value === 'user' || value === 'assistant';
+}
+
 function firstHeader(value: string | readonly string[] | undefined): string | undefined {
   return typeof value === 'string' || value === undefined ? value : value[0];
+}
+
+function normalizeNodeHeaders(request: IncomingMessage): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    Object.entries(request.headers).flatMap(([name, value]) =>
+      value === undefined ? [] : [[name, Array.isArray(value) ? value.join(', ') : value]],
+    ),
+  );
 }
 
 async function readRequestBody(request: IncomingMessage): Promise<string> {
@@ -344,13 +454,22 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-function recordRequest(request: Request): FixtureRequestRecord {
+async function recordRequest(request: Request): Promise<FixtureRequestRecord> {
+  const [headers, authorization] = await Promise.all([
+    request.allHeaders(),
+    request.headerValue('authorization'),
+  ]);
   return {
     url: request.url(),
     method: request.method(),
-    authorization: request.headers()['authorization'],
+    authorization: authorization ?? undefined,
+    headers,
     postData: request.postData(),
   };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function fulfillJson(route: Route, body: unknown): Promise<void> {
