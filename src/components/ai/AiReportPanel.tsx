@@ -8,11 +8,12 @@ import {
 } from '../../ai/client';
 import {
   REPORT_SECTION_HEADINGS,
+  createIncrementalReportParser,
   createReportMessages,
-  parseCompleteReport,
+  validateReportContext,
   type ReportContext,
   type ReportSection,
-  type ReportSectionHeading,
+  type ReportStructureFailureReason,
 } from '../../ai/report-contract';
 import {
   sanitizeAiProviderSettings,
@@ -20,13 +21,14 @@ import {
   type AiProviderSettings,
   type SanitizedAiProviderSettings,
 } from './AiSettings';
+import { DeterministicContext } from './DeterministicContext';
 
 export type AiReportStreamer = (
   configuration: AiClientConfiguration,
   messages: readonly AiChatMessage[],
 ) => AsyncIterable<AiStreamEvent>;
 
-export interface GeneratedAiReport {
+export interface CompleteAiReport {
   readonly status: 'complete';
   readonly completedAt: string;
   readonly provider: SanitizedAiProviderSettings;
@@ -35,12 +37,29 @@ export interface GeneratedAiReport {
   readonly sections: readonly ReportSection[];
 }
 
+export type DraftReportReason = 'cancelled' | 'stream-interrupted' | 'contract-invalid';
+
+export interface DraftAiReport {
+  readonly status: 'draft';
+  readonly interruptedAt: string;
+  readonly provider: SanitizedAiProviderSettings;
+  readonly context: ReportContext;
+  readonly rawText: string;
+  readonly sections: readonly ReportSection[];
+  readonly reason: DraftReportReason;
+  readonly contractFailure?: ReportStructureFailureReason;
+  readonly errorMessage?: string;
+}
+
+export type GeneratedAiReport = CompleteAiReport | DraftAiReport;
+
 export interface AiReportPanelProps {
   readonly context: ReportContext;
   readonly settings: AiProviderSettings;
   readonly active?: boolean;
   readonly stream?: AiReportStreamer;
-  readonly onSaveReport?: (report: GeneratedAiReport) => void;
+  readonly onSaveReport?: (report: CompleteAiReport) => void;
+  readonly onDraftReport?: (report: DraftAiReport) => void;
   readonly now?: () => Date;
 }
 
@@ -57,20 +76,24 @@ export function AiReportPanel({
   active = true,
   stream = browserReportStreamer,
   onSaveReport,
+  onDraftReport,
   now = currentTime,
 }: AiReportPanelProps) {
   const [phase, setPhase] = useState<ReportPhase>('idle');
-  const [rawText, setRawText] = useState('');
+  const [visibleSections, setVisibleSections] = useState<readonly ReportSection[]>(emptySections);
+  const [capturedContext, setCapturedContext] = useState<ReportContext | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [draftReason, setDraftReason] = useState<string | null>(null);
-  const [completeReport, setCompleteReport] = useState<GeneratedAiReport | null>(null);
+  const [completeReport, setCompleteReport] = useState<CompleteAiReport | null>(null);
   const [saved, setSaved] = useState(false);
   const activeController = useRef<AbortController | null>(null);
+  const activeGeneration = useRef<ActiveGeneration | null>(null);
   const generationId = useRef(0);
   const configurationErrors = validateAiProviderSettings(settings);
   const canGenerate = Object.keys(configurationErrors).length === 0;
-  const visibleSections = parseDraftSections(rawText);
   const showReportSections = phase === 'streaming' || phase === 'draft' || phase === 'complete';
+  const displayedContext =
+    showReportSections && capturedContext !== null ? capturedContext : context;
 
   useEffect(
     () => () => {
@@ -85,13 +108,32 @@ export function AiReportPanel({
       return;
     }
 
+    let generationContext: ReportContext;
+    try {
+      generationContext = validateReportContext(context);
+    } catch {
+      setErrorMessage('确定性上下文未通过报告契约校验，无法生成。');
+      setPhase('error');
+      return;
+    }
+
     activeController.current?.abort();
     const controller = new AbortController();
     const requestId = generationId.current + 1;
     generationId.current = requestId;
     activeController.current = controller;
+    activeGeneration.current = {
+      requestId,
+      controller,
+      context: generationContext,
+      settings,
+      rawText: '',
+      sections: emptySections(),
+      draftDelivered: false,
+    };
     setPhase('streaming');
-    setRawText('');
+    setVisibleSections(emptySections());
+    setCapturedContext(generationContext);
     setErrorMessage(null);
     setDraftReason(null);
     setCompleteReport(null);
@@ -100,20 +142,33 @@ export function AiReportPanel({
     void runGeneration({
       requestId,
       controller,
-      context,
+      context: generationContext,
       settings,
       stream,
       now,
       isActive: () => generationId.current === requestId,
-      onDelta: (text) => setRawText(text),
+      onDelta: (text, sections) => {
+        const currentGeneration = activeGeneration.current;
+        if (currentGeneration?.requestId === requestId) {
+          currentGeneration.rawText = text;
+          currentGeneration.sections = sections;
+        }
+        setVisibleSections(sections);
+      },
       onComplete: (report) => {
         setCompleteReport(report);
+        setVisibleSections(report.sections);
         setPhase('complete');
       },
-      onDraft: (text, reason, message) => {
-        setRawText(text);
-        setDraftReason(reason);
-        setErrorMessage(message);
+      onDraft: (report, reasonLabel) => {
+        const currentGeneration = activeGeneration.current;
+        if (currentGeneration?.requestId === requestId && !currentGeneration.draftDelivered) {
+          currentGeneration.draftDelivered = true;
+          onDraftReport?.(report);
+        }
+        setVisibleSections(report.sections);
+        setDraftReason(reasonLabel);
+        setErrorMessage(report.errorMessage ?? null);
         setPhase('draft');
       },
       onError: (message) => {
@@ -124,14 +179,35 @@ export function AiReportPanel({
         if (activeController.current === controller) {
           activeController.current = null;
         }
+        if (activeGeneration.current?.requestId === requestId) {
+          activeGeneration.current = null;
+        }
       },
     });
   };
 
   const cancel = () => {
+    const currentGeneration = activeGeneration.current;
+    if (currentGeneration === null) {
+      return;
+    }
     generationId.current += 1;
-    activeController.current?.abort();
+    currentGeneration.controller.abort();
     activeController.current = null;
+    const draft = createDraftReport({
+      context: currentGeneration.context,
+      settings: currentGeneration.settings,
+      rawText: currentGeneration.rawText,
+      sections: currentGeneration.sections,
+      reason: 'cancelled',
+      now,
+    });
+    if (!currentGeneration.draftDelivered) {
+      currentGeneration.draftDelivered = true;
+      onDraftReport?.(draft);
+    }
+    activeGeneration.current = null;
+    setVisibleSections(draft.sections);
     setDraftReason('生成已取消');
     setErrorMessage(null);
     setPhase('draft');
@@ -159,7 +235,7 @@ export function AiReportPanel({
         <ReportStatus phase={phase} draftReason={draftReason} />
       </div>
 
-      <DeterministicContext context={context} />
+      <DeterministicContext context={displayedContext} />
 
       <div className="ai-report__actions">
         {phase === 'streaming' ? (
@@ -216,9 +292,9 @@ interface GenerationCallbacks {
   readonly stream: AiReportStreamer;
   readonly now: () => Date;
   readonly isActive: () => boolean;
-  readonly onDelta: (text: string) => void;
-  readonly onComplete: (report: GeneratedAiReport) => void;
-  readonly onDraft: (text: string, reason: string, message: string | null) => void;
+  readonly onDelta: (text: string, sections: readonly ReportSection[]) => void;
+  readonly onComplete: (report: CompleteAiReport) => void;
+  readonly onDraft: (report: DraftAiReport, reasonLabel: string) => void;
   readonly onError: (message: string) => void;
   readonly onFinished: () => void;
 }
@@ -226,6 +302,7 @@ interface GenerationCallbacks {
 async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
   let aggregate = '';
   let terminalEvent = false;
+  const parser = createIncrementalReportParser();
 
   try {
     const messages = createReportMessages(callbacks.context);
@@ -245,33 +322,81 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
       }
       if (event.type === 'delta') {
         aggregate += event.text;
-        callbacks.onDelta(aggregate);
+        const parsed = parser.push(event.text);
+        callbacks.onDelta(aggregate, parsed.sections);
+        if (parsed.status === 'invalid') {
+          callbacks.controller.abort();
+          callbacks.onDraft(
+            createDraftReport({
+              context: callbacks.context,
+              settings: callbacks.settings,
+              rawText: aggregate,
+              sections: parsed.sections,
+              reason: 'contract-invalid',
+              contractFailure: parsed.reason,
+              errorMessage: 'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。',
+              now: callbacks.now,
+            }),
+            '响应未通过七章节契约校验',
+          );
+          return;
+        }
         continue;
       }
 
       terminalEvent = true;
       if (event.type === 'complete') {
-        try {
-          const sections = parseCompleteReport(aggregate);
+        const parsed = parser.finish();
+        if (parsed.status === 'complete') {
           callbacks.onComplete({
             status: 'complete',
             completedAt: callbacks.now().toISOString(),
             provider: sanitizeAiProviderSettings(callbacks.settings),
             context: callbacks.context,
             rawText: aggregate,
-            sections,
+            sections: parsed.sections,
           });
-        } catch {
+        } else {
+          callbacks.controller.abort();
           callbacks.onDraft(
-            aggregate,
+            createDraftReport({
+              context: callbacks.context,
+              settings: callbacks.settings,
+              rawText: aggregate,
+              sections: parsed.sections,
+              reason: 'contract-invalid',
+              contractFailure: parsed.reason,
+              errorMessage: 'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。',
+              now: callbacks.now,
+            }),
             '响应未通过七章节契约校验',
-            'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。',
           );
         }
       } else if (event.type === 'aborted') {
-        callbacks.onDraft(aggregate, '生成已取消', null);
+        callbacks.onDraft(
+          createDraftReport({
+            context: callbacks.context,
+            settings: callbacks.settings,
+            rawText: aggregate,
+            sections: parser.snapshot(),
+            reason: 'cancelled',
+            now: callbacks.now,
+          }),
+          '生成已取消',
+        );
       } else if (aggregate.length > 0) {
-        callbacks.onDraft(aggregate, '流式响应中断', event.message);
+        callbacks.onDraft(
+          createDraftReport({
+            context: callbacks.context,
+            settings: callbacks.settings,
+            rawText: aggregate,
+            sections: parser.snapshot(),
+            reason: 'stream-interrupted',
+            errorMessage: event.message,
+            now: callbacks.now,
+          }),
+          '流式响应中断',
+        );
       } else {
         callbacks.onError(event.message);
       }
@@ -280,7 +405,18 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
 
     if (!terminalEvent && callbacks.isActive()) {
       if (aggregate.length > 0) {
-        callbacks.onDraft(aggregate, '流式响应中断', 'AI 响应流意外中断。');
+        callbacks.onDraft(
+          createDraftReport({
+            context: callbacks.context,
+            settings: callbacks.settings,
+            rawText: aggregate,
+            sections: parser.snapshot(),
+            reason: 'stream-interrupted',
+            errorMessage: 'AI 响应流意外中断。',
+            now: callbacks.now,
+          }),
+          '流式响应中断',
+        );
       } else {
         callbacks.onError('AI 响应流意外中断。');
       }
@@ -290,13 +426,63 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
       return;
     }
     if (aggregate.length > 0) {
-      callbacks.onDraft(aggregate, '流式响应中断', '无法连接 AI 提供商，请稍后重试。');
+      callbacks.onDraft(
+        createDraftReport({
+          context: callbacks.context,
+          settings: callbacks.settings,
+          rawText: aggregate,
+          sections: parser.snapshot(),
+          reason: 'stream-interrupted',
+          errorMessage: '无法连接 AI 提供商，请稍后重试。',
+          now: callbacks.now,
+        }),
+        '流式响应中断',
+      );
     } else {
       callbacks.onError('无法连接 AI 提供商，请稍后重试。');
     }
   } finally {
     callbacks.onFinished();
   }
+}
+
+interface ActiveGeneration {
+  readonly requestId: number;
+  readonly controller: AbortController;
+  readonly context: ReportContext;
+  readonly settings: AiProviderSettings;
+  rawText: string;
+  sections: readonly ReportSection[];
+  draftDelivered: boolean;
+}
+
+interface DraftReportInput {
+  readonly context: ReportContext;
+  readonly settings: AiProviderSettings;
+  readonly rawText: string;
+  readonly sections: readonly ReportSection[];
+  readonly reason: DraftReportReason;
+  readonly contractFailure?: ReportStructureFailureReason;
+  readonly errorMessage?: string;
+  readonly now: () => Date;
+}
+
+function createDraftReport(input: DraftReportInput): DraftAiReport {
+  return {
+    status: 'draft',
+    interruptedAt: input.now().toISOString(),
+    provider: sanitizeAiProviderSettings(input.settings),
+    context: input.context,
+    rawText: input.rawText,
+    sections: input.sections,
+    reason: input.reason,
+    ...(input.contractFailure === undefined ? {} : { contractFailure: input.contractFailure }),
+    ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
+  };
+}
+
+function emptySections(): readonly ReportSection[] {
+  return REPORT_SECTION_HEADINGS.map((heading) => ({ heading, content: '' }));
 }
 
 function ReportStatus({
@@ -321,58 +507,6 @@ function ReportStatus({
   return <span className="ai-report__status">尚未生成</span>;
 }
 
-function DeterministicContext({ context }: { readonly context: ReportContext }) {
-  const missing = context.availability.filter((item) => item.status === 'missing');
-  return (
-    <section className="ai-report__context" aria-labelledby="ai-report-context-heading">
-      <h3 id="ai-report-context-heading">确定性分析摘要</h3>
-      <dl>
-        <div>
-          <dt>数据截止</dt>
-          <dd>
-            <time dateTime={context.cutoff}>{context.cutoff}</time>
-          </dd>
-        </div>
-        <div>
-          <dt>数据来源</dt>
-          <dd>{context.source}</dd>
-        </div>
-        <div>
-          <dt>收盘价</dt>
-          <dd>{formatMetric(context.price.close)}</dd>
-        </div>
-      </dl>
-      <div className="ai-report__signal-row">
-        <p>趋势评分 {formatScore(context.signals.trend.score)}</p>
-        <p>估值评分 {formatScore(context.signals.valuation.score)}</p>
-        <p>质量评分 {formatScore(context.signals.quality.score)}</p>
-      </div>
-      <div className="ai-report__disclosures">
-        <div>
-          <h4>缺失指标</h4>
-          {missing.length === 0 ? (
-            <p>当前上下文未声明缺失指标。</p>
-          ) : (
-            <ul>
-              {missing.map((item) => (
-                <li key={item.metric}>{item.reason}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div>
-          <h4>来源限制</h4>
-          <ul>
-            {context.limitations.map((limitation) => (
-              <li key={limitation}>{limitation}</li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function ReportSectionContent({
   content,
   phase,
@@ -391,37 +525,4 @@ function ReportSectionContent({
     );
   }
   return lines.map((line, index) => <p key={`${index}:${line}`}>{line}</p>);
-}
-
-function parseDraftSections(
-  rawText: string,
-): readonly { readonly heading: ReportSectionHeading; readonly content: string }[] {
-  const linesByHeading = new Map<ReportSectionHeading, string[]>();
-  let currentHeading: ReportSectionHeading | undefined;
-
-  for (const line of rawText.replaceAll('\r\n', '\n').split('\n')) {
-    const headingText = /^#{1,6}\s+(.+?)\s*$/.exec(line)?.[1];
-    if (headingText !== undefined) {
-      currentHeading = REPORT_SECTION_HEADINGS.find((heading) => heading === headingText);
-      continue;
-    }
-    if (currentHeading !== undefined) {
-      const lines = linesByHeading.get(currentHeading) ?? [];
-      lines.push(line);
-      linesByHeading.set(currentHeading, lines);
-    }
-  }
-
-  return REPORT_SECTION_HEADINGS.map((heading) => ({
-    heading,
-    content: (linesByHeading.get(heading) ?? []).join('\n').trim(),
-  }));
-}
-
-function formatMetric(value: number | null): string {
-  return value === null ? '缺失' : new Intl.NumberFormat('zh-CN').format(value);
-}
-
-function formatScore(value: number | null): string {
-  return value === null ? '不可计算' : `${value.toFixed(1)} / 100`;
 }

@@ -1,5 +1,6 @@
 export interface AiClientConfiguration {
   readonly baseUrl: string;
+  readonly applicationOrigin?: string;
   readonly model: string;
   readonly apiKey: string;
   readonly signal: AbortSignal;
@@ -44,7 +45,10 @@ const SAFE_NETWORK_ERROR = '无法连接 AI 提供商，请稍后重试。';
 const SAFE_MALFORMED_ERROR = 'AI 服务返回了无法解析的流数据。';
 const SAFE_INTERRUPTED_ERROR = 'AI 响应流意外中断。';
 
-export function buildChatCompletionsUrl(baseUrl: string): string {
+export function buildChatCompletionsUrl(
+  baseUrl: string,
+  applicationOrigin = runtimeApplicationOrigin(),
+): string {
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -57,6 +61,15 @@ export function buildChatCompletionsUrl(baseUrl: string): string {
   }
   if (url.search.length > 0 || url.hash.length > 0) {
     throw new TypeError('AI base URL must not contain a query or fragment');
+  }
+  if (applicationOrigin !== undefined) {
+    const applicationUrl = new URL(applicationOrigin);
+    if (
+      url.origin === applicationUrl.origin &&
+      (url.pathname === '/api' || url.pathname.startsWith('/api/'))
+    ) {
+      throw new TypeError('AI base URL must not use the application API');
+    }
   }
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHost(url.hostname))) {
     throw new TypeError('AI base URL must use HTTPS except for localhost or loopback testing');
@@ -88,7 +101,7 @@ async function* streamChatCompletion(
 
   let requestUrl: string;
   try {
-    requestUrl = buildChatCompletionsUrl(configuration.baseUrl);
+    requestUrl = buildChatCompletionsUrl(configuration.baseUrl, configuration.applicationOrigin);
     if (configuration.model.trim().length === 0 || configuration.apiKey.trim().length === 0) {
       throw new TypeError('Model and API key are required');
     }
@@ -280,4 +293,8 @@ function isLoopbackHost(hostname: string): boolean {
     hostname === '[::1]' ||
     /^127(?:\.\d{1,3}){3}$/.test(hostname)
   );
+}
+
+function runtimeApplicationOrigin(): string | undefined {
+  return typeof window === 'undefined' ? undefined : window.location.origin;
 }

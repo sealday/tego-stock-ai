@@ -263,4 +263,40 @@ describe('OpenAI-compatible browser client', () => {
     );
     expect(() => buildChatCompletionsUrl('http://provider.example/v1')).toThrow(/HTTPS/i);
   });
+
+  it('rejects a same-origin /api base before fetch without exposing the key or request body', async () => {
+    const fetchClient = vi.fn<AiFetchClient>();
+    const events = await collect(
+      createAiClient(
+        {
+          baseUrl: 'https://stocks.example/api/ai-provider',
+          applicationOrigin: 'https://stocks.example',
+          model: 'research-model',
+          apiKey: 'sk-same-origin-secret',
+          signal: new AbortController().signal,
+        },
+        fetchClient,
+      ),
+    );
+
+    expect(fetchClient).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      {
+        type: 'error',
+        code: 'configuration',
+        message: 'AI 提供商地址、模型或 API key 配置无效。',
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toContain('sk-same-origin-secret');
+    expect(JSON.stringify(events)).not.toContain('Generate the report');
+  });
+
+  it('allows an external absolute provider whose base path contains /api', () => {
+    expect(
+      buildChatCompletionsUrl(
+        'https://external-provider.example/api/openai/v1',
+        'https://stocks.example',
+      ),
+    ).toBe('https://external-provider.example/api/openai/v1/chat/completions');
+  });
 });

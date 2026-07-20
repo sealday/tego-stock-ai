@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -7,7 +7,8 @@ import { REPORT_SECTION_HEADINGS, type ReportContext } from '../../src/ai/report
 import {
   AiReportPanel,
   type AiReportStreamer,
-  type GeneratedAiReport,
+  type CompleteAiReport,
+  type DraftAiReport,
 } from '../../src/components/ai/AiReportPanel';
 import type { AiProviderSettings } from '../../src/components/ai/AiSettings';
 
@@ -49,6 +50,7 @@ function reportContext(): ReportContext {
         score: 78.2,
         band: 'constructive',
         status: 'complete',
+        cutoff: '2026-07-16',
         calculationVersion: '1.0.0',
         observations: ['收盘价高于 MA20 与 MA60'],
         missingInputs: [],
@@ -57,27 +59,94 @@ function reportContext(): ReportContext {
         score: null,
         band: null,
         status: 'insufficient',
+        cutoff: '2026-07-17',
         calculationVersion: '1.0.0',
         observations: [],
-        missingInputs: ['pe', 'dividendYield'],
+        missingInputs: ['pe', 'dividendYield', 'pe'],
       },
       quality: {
         score: 82,
         band: 'strong',
         status: 'partial',
+        cutoff: '2026-07-15',
         calculationVersion: '1.0.0',
         observations: ['ROE 与毛利率可用'],
         missingInputs: ['revenueGrowth'],
       },
     },
-    availability: [
-      { metric: 'close', status: 'available' },
-      { metric: 'peTtm', status: 'missing', reason: '当前权限未返回市盈率' },
-      { metric: 'revenueGrowth', status: 'missing', reason: '当前报告期未披露营收增长' },
-    ],
+    availability: completeAvailability(),
+    cutoffs: {
+      overview: '2026-07-17',
+      history: '2026-07-16',
+      fundamentals: '2026-07-15',
+      trend: '2026-07-16',
+      valuation: '2026-07-17',
+      quality: '2026-07-15',
+    },
     cutoff: '2026-07-17',
     source: 'Tushare Pro',
     limitations: ['仅包含历史日线收盘数据'],
+  };
+}
+
+function completeAvailability(): ReportContext['availability'] {
+  const missing = new Map([
+    ['peTtm', '当前权限未返回市盈率'],
+    ['revenueGrowth', '当前报告期未披露营收增长'],
+    ['valuationScore', '估值评分参考样本不足'],
+  ]);
+  return [
+    'close',
+    'previousClose',
+    'changePercent',
+    'peTtm',
+    'pb',
+    'totalMarketValueCny',
+    'roe',
+    'grossMargin',
+    'revenueGrowth',
+    'profitGrowth',
+    'operatingCashToNetProfit',
+    'debtToAssets',
+    'ma5',
+    'ma20',
+    'ma60',
+    'rsi14',
+    'macdHistogram',
+    'volumeRatio20',
+    'realizedVolatility20',
+    'maximumDrawdown',
+    'trendScore',
+    'valuationScore',
+    'qualityScore',
+  ].map((metric) => {
+    const reason = missing.get(metric);
+    return reason === undefined
+      ? { metric, status: 'available' as const }
+      : { metric, status: 'missing' as const, reason };
+  }) as ReportContext['availability'];
+}
+
+function nextReportContext(): ReportContext {
+  const initial = reportContext();
+  return {
+    ...initial,
+    stock: { code: '000001.SZ', name: '平安银行' },
+    price: { ...initial.price, close: 12.34 },
+    signals: {
+      trend: { ...initial.signals.trend, cutoff: '2026-07-19' },
+      valuation: { ...initial.signals.valuation, cutoff: '2026-07-19' },
+      quality: { ...initial.signals.quality, cutoff: '2026-07-19' },
+    },
+    cutoffs: {
+      overview: '2026-07-19',
+      history: '2026-07-19',
+      fundamentals: '2026-07-19',
+      trend: '2026-07-19',
+      valuation: '2026-07-19',
+      quality: '2026-07-19',
+    },
+    cutoff: '2026-07-19',
   };
 }
 
@@ -106,7 +175,7 @@ describe('AiReportPanel', () => {
         { type: 'complete' },
       ]),
     );
-    const onSaveReport = vi.fn<(report: GeneratedAiReport) => void>();
+    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
     const { container } = render(
       <AiReportPanel
         context={reportContext()}
@@ -144,8 +213,9 @@ describe('AiReportPanel', () => {
     expect(screen.getByText('完整报告已交给本地保存回调')).toBeVisible();
   });
 
-  it('cancels an active stream and labels partial output as an interrupted draft', async () => {
+  it('cancels an active stream and hands off one non-saveable draft', async () => {
     const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
     const stream: AiReportStreamer = async function* (configuration) {
       yield { type: 'delta', text: '## 数据摘要与截止日期\n流式草稿内容。' };
       await new Promise<void>((resolve) => {
@@ -153,7 +223,14 @@ describe('AiReportPanel', () => {
       });
       yield { type: 'aborted' };
     };
-    render(<AiReportPanel context={reportContext()} settings={SETTINGS} stream={stream} />);
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onDraftReport={onDraftReport}
+      />,
+    );
 
     await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
     await screen.findByText('流式草稿内容。');
@@ -162,6 +239,12 @@ describe('AiReportPanel', () => {
     expect(await screen.findByText('未完成草稿 · 生成已取消')).toBeVisible();
     expect(screen.getByRole('button', { name: '仅重试 AI 生成' })).toBeVisible();
     expect(screen.queryByRole('button', { name: '保存完整报告' })).toBeNull();
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+      status: 'draft',
+      reason: 'cancelled',
+      context: { stock: { code: '600519.SH' } },
+    });
   });
 
   it('keeps deterministic context and missing metrics usable through provider failure and AI-only retry', async () => {
@@ -190,6 +273,14 @@ describe('AiReportPanel', () => {
     expect(screen.getByText('趋势评分 78.2 / 100')).toBeVisible();
     expect(screen.getByText('当前权限未返回市盈率')).toBeVisible();
     expect(screen.getByText('当前报告期未披露营收增长')).toBeVisible();
+    expect(screen.getByText('peTtm')).toBeVisible();
+    expect(screen.getAllByText('revenueGrowth')).toHaveLength(2);
+    expect(screen.getByText('贵州茅台 · 600519.SH')).toBeVisible();
+    expect(screen.getByText('历史数据 2026-07-16')).toBeVisible();
+    expect(screen.getByText('基本面数据 2026-07-15')).toBeVisible();
+    const valuationMissing = screen.getByRole('group', { name: '估值评分缺失输入' });
+    expect(within(valuationMissing).getAllByText('pe')).toHaveLength(1);
+    expect(within(valuationMissing).getByText('dividendYield')).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: '仅重试 AI 生成' }));
     await screen.findByText('报告已完成');
@@ -199,19 +290,28 @@ describe('AiReportPanel', () => {
 
   it('keeps an invalid completed response as a non-saveable interrupted draft', async () => {
     const user = userEvent.setup();
-    const onSaveReport = vi.fn<(report: GeneratedAiReport) => void>();
+    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    let requestAborted = false;
+    const stream: AiReportStreamer = async function* (configuration) {
+      try {
+        yield {
+          type: 'delta',
+          text: '## 数据摘要与截止日期\n有效内容。\n## 明确买卖建议\n',
+        };
+        yield { type: 'delta', text: '结构错误后不应继续消费。' };
+        yield { type: 'complete' };
+      } finally {
+        requestAborted = configuration.signal.aborted;
+      }
+    };
     render(
       <AiReportPanel
         context={reportContext()}
         settings={SETTINGS}
-        stream={eventStream([
-          {
-            type: 'delta',
-            text: `${completeReport()}\n\n## 明确买卖建议\n不允许的章节。`,
-          },
-          { type: 'complete' },
-        ])}
+        stream={stream}
         onSaveReport={onSaveReport}
+        onDraftReport={onDraftReport}
       />,
     );
 
@@ -221,10 +321,18 @@ describe('AiReportPanel', () => {
     expect(screen.getByRole('alert').textContent).toMatch(/AI 返回内容无效/);
     expect(screen.queryByRole('button', { name: '保存完整报告' })).toBeNull();
     expect(onSaveReport).not.toHaveBeenCalled();
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+      status: 'draft',
+      reason: 'contract-invalid',
+      contractFailure: 'unknown-heading',
+    });
+    await waitFor(() => expect(requestAborted).toBe(true));
   });
 
   it('marks a stream error after deltas as an interrupted draft', async () => {
     const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
     render(
       <AiReportPanel
         context={reportContext()}
@@ -233,6 +341,7 @@ describe('AiReportPanel', () => {
           { type: 'delta', text: '## 数据摘要与截止日期\n部分内容。' },
           { type: 'error', code: 'network', message: '无法连接 AI 提供商，请稍后重试。' },
         ])}
+        onDraftReport={onDraftReport}
       />,
     );
 
@@ -241,6 +350,97 @@ describe('AiReportPanel', () => {
     expect(await screen.findByText('未完成草稿 · 流式响应中断')).toBeVisible();
     expect(screen.getByRole('alert').textContent).toContain('无法连接 AI 提供商');
     expect(screen.getByText('部分内容。')).toBeVisible();
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+      status: 'draft',
+      reason: 'stream-interrupted',
+    });
+  });
+
+  it('binds streaming, completed output, and saving to the generation snapshot', async () => {
+    const user = userEvent.setup();
+    let releaseStream: () => void = () => {};
+    const holdStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
+    const rawReport = completeReport();
+    const stream = vi.fn<AiReportStreamer>(async function* () {
+      const splitAt = rawReport.indexOf('截止日期') + 2;
+      yield { type: 'delta', text: rawReport.slice(0, splitAt) };
+      await holdStream;
+      yield { type: 'delta', text: rawReport.slice(splitAt) };
+      yield { type: 'complete' };
+    });
+    const { rerender } = render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onSaveReport={onSaveReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    await screen.findByText('正在流式生成');
+    rerender(
+      <AiReportPanel
+        context={nextReportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onSaveReport={onSaveReport}
+      />,
+    );
+    expect(screen.getByText('贵州茅台 · 600519.SH')).toBeVisible();
+    expect(screen.queryByText('平安银行 · 000001.SZ')).toBeNull();
+
+    releaseStream();
+    await screen.findByText('报告已完成');
+    expect(screen.getByText('贵州茅台 · 600519.SH')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '保存完整报告' }));
+    expect(onSaveReport.mock.calls[0]?.[0].context.stock).toEqual({
+      code: '600519.SH',
+      name: '贵州茅台',
+    });
+  });
+
+  it('captures the current context when retrying after a failed request', async () => {
+    const user = userEvent.setup();
+    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
+    let attempt = 0;
+    const stream = vi.fn<AiReportStreamer>(async function* () {
+      attempt += 1;
+      if (attempt === 1) {
+        yield { type: 'error', code: 'network', message: '第一次失败。' };
+        return;
+      }
+      yield { type: 'delta', text: completeReport('第二次生成。') };
+      yield { type: 'complete' };
+    });
+    const { rerender } = render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onSaveReport={onSaveReport}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    await screen.findByText('AI 生成失败');
+
+    rerender(
+      <AiReportPanel
+        context={nextReportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onSaveReport={onSaveReport}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: '仅重试 AI 生成' }));
+    await screen.findByText('报告已完成');
+    expect(screen.getByText('平安银行 · 000001.SZ')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '保存完整报告' }));
+    expect(onSaveReport.mock.calls[0]?.[0].context.stock.code).toBe('000001.SZ');
   });
 
   it('disables generation until the model and key are explicitly configured', () => {

@@ -3,7 +3,12 @@ import { useRef, useState, type KeyboardEvent } from 'react';
 import { createWorkspaceReportContext } from '../../ai/report-contract';
 import { WORKSPACE_TABS, type WorkspaceTabId } from '../../app/routes';
 import { formatShanghaiTimestamp, type StockWorkspaceState } from '../../hooks/use-stock-workspace';
-import { AiReportPanel, type GeneratedAiReport } from '../ai/AiReportPanel';
+import {
+  AiReportPanel,
+  type CompleteAiReport,
+  type DraftAiReport,
+  type GeneratedAiReport,
+} from '../ai/AiReportPanel';
 import {
   AiSettings,
   DEFAULT_AI_PROVIDER_SETTINGS,
@@ -18,7 +23,7 @@ import { TechnicalPanel } from './TechnicalPanel';
 export function StockWorkspace({ state }: { readonly state: StockWorkspaceState }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('overview');
   const [aiSettings, setAiSettings] = useState<AiProviderSettings>(DEFAULT_AI_PROVIDER_SETTINGS);
-  const [savedReports, setSavedReports] = useState<readonly GeneratedAiReport[]>([]);
+  const [reports, setReports] = useState<readonly GeneratedAiReport[]>([]);
   const tabReferences = useRef<Array<HTMLButtonElement | null>>([]);
   const name = state.overview.status === 'success' ? state.overview.envelope.data.name : state.code;
   const marketSnapshotStale =
@@ -118,10 +123,11 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
               state={state}
               active={activeTab === tab.id}
               settings={aiSettings}
-              savedReportCount={savedReports.length}
+              reportCount={reports.length}
               onSettingsChange={setAiSettings}
-              onSaveReport={(report) =>
-                setSavedReports((currentReports) => [report, ...currentReports])
+              onSaveReport={(report) => setReports((currentReports) => [report, ...currentReports])}
+              onDraftReport={(report) =>
+                setReports((currentReports) => [report, ...currentReports])
               }
             />
           ) : activeTab === tab.id ? (
@@ -220,16 +226,18 @@ function AiReportWorkspace({
   state,
   active,
   settings,
-  savedReportCount,
+  reportCount,
   onSettingsChange,
   onSaveReport,
+  onDraftReport,
 }: {
   readonly state: StockWorkspaceState;
   readonly active: boolean;
   readonly settings: AiProviderSettings;
-  readonly savedReportCount: number;
+  readonly reportCount: number;
   readonly onSettingsChange: (settings: AiProviderSettings) => void;
-  readonly onSaveReport: (report: GeneratedAiReport) => void;
+  readonly onSaveReport: (report: CompleteAiReport) => void;
+  readonly onDraftReport: (report: DraftAiReport) => void;
 }) {
   const context = createWorkspaceReportContext(state);
 
@@ -250,11 +258,12 @@ function AiReportWorkspace({
           context={context}
           settings={settings}
           onSaveReport={onSaveReport}
+          onDraftReport={onDraftReport}
         />
       )}
-      {active && savedReportCount > 0 ? (
+      {active && reportCount > 0 ? (
         <p className="ai-report-workspace__saved-count">
-          当前页面会话已交给保存回调 {savedReportCount} 份完整报告。
+          当前页面会话已保留 {reportCount} 份完整报告或未完成草稿。
         </p>
       ) : null}
     </div>

@@ -277,6 +277,37 @@ describe('StockWorkspace', () => {
     expect(screen.getByText(/确定性分析摘要/)).toBeVisible();
   });
 
+  it('keeps interrupted report drafts in the page-session report union without a save path', async () => {
+    const partialReport = '## 数据摘要与截止日期\n流式草稿。';
+    const fetchClient = vi.fn(
+      async () =>
+        new Response(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: partialReport } }] })}\n\n`,
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchClient);
+
+    try {
+      render(<StockWorkspace state={readyState()} />);
+      fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+      fireEvent.change(screen.getByLabelText('模型标识符'), {
+        target: { value: 'research-model' },
+      });
+      fireEvent.change(screen.getByLabelText('API key'), {
+        target: { value: 'sk-session-only' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+      expect(await screen.findByText('未完成草稿 · 流式响应中断')).toBeVisible();
+      expect(screen.getByText('当前页面会话已保留 1 份完整报告或未完成草稿。')).toBeVisible();
+      expect(screen.queryByRole('button', { name: '保存完整报告' })).toBeNull();
+      expect(fetchClient).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('keeps every tab control attached to a persistent hidden or visible tabpanel', () => {
     render(<StockWorkspace state={readyState()} />);
 
