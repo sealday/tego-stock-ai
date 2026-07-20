@@ -84,6 +84,13 @@ function reportContext(): ReportContext {
       quality: '2026-07-15',
     },
     cutoff: '2026-07-17',
+    freshness: {
+      workspace: 'stale',
+      overview: 'stale',
+      history: 'fresh',
+      fundamentals: 'fresh',
+      marketStatus: 'stale',
+    },
     source: 'Tushare Pro',
     limitations: ['仅包含历史日线收盘数据'],
   };
@@ -160,6 +167,21 @@ function eventStream(events: readonly AiStreamEvent[]): AiReportStreamer {
   return async function* () {
     for (const event of events) {
       yield event;
+    }
+  };
+}
+
+type InterruptedTerminal = 'aborted' | 'error' | 'eof' | 'throw';
+
+function interruptedStream(pendingText: string, terminal: InterruptedTerminal): AiReportStreamer {
+  return async function* () {
+    yield { type: 'delta', text: pendingText };
+    if (terminal === 'aborted') {
+      yield { type: 'aborted' };
+    } else if (terminal === 'error') {
+      yield { type: 'error', code: 'provider', message: '提供商中断。' };
+    } else if (terminal === 'throw') {
+      throw new Error('stream failed');
     }
   };
 }
@@ -247,6 +269,40 @@ describe('AiReportPanel', () => {
     });
   });
 
+  it('finalizes a pending structural violation when the user cancels generation', async () => {
+    const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    const stream: AiReportStreamer = async function* (configuration) {
+      yield {
+        type: 'delta',
+        text: '## 数据摘要与截止日期\n取消前草稿。\n## 未批准的最终章节',
+      };
+      await new Promise<void>((resolve) => {
+        configuration.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      yield { type: 'aborted' };
+    };
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    expect(await screen.findByText('取消前草稿。')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '取消生成' }));
+
+    expect(screen.getByText('未完成草稿 · 响应未通过七章节契约校验')).toBeVisible();
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+      reason: 'contract-invalid',
+      contractFailure: 'unknown-heading',
+    });
+  });
+
   it('keeps deterministic context and missing metrics usable through provider failure and AI-only retry', async () => {
     const user = userEvent.setup();
     let attempt = 0;
@@ -278,6 +334,10 @@ describe('AiReportPanel', () => {
     expect(screen.getByText('贵州茅台 · 600519.SH')).toBeVisible();
     expect(screen.getByText('历史数据 2026-07-16')).toBeVisible();
     expect(screen.getByText('基本面数据 2026-07-15')).toBeVisible();
+    const freshness = screen.getByRole('group', { name: '数据新鲜度明细' });
+    expect(within(freshness).getByText('整体 延迟')).toBeVisible();
+    expect(within(freshness).getByText('行情 延迟')).toBeVisible();
+    expect(within(freshness).getByText('历史 新鲜')).toBeVisible();
     const valuationMissing = screen.getByRole('group', { name: '估值评分缺失输入' });
     expect(within(valuationMissing).getAllByText('pe')).toHaveLength(1);
     expect(within(valuationMissing).getByText('dividendYield')).toBeVisible();
@@ -356,6 +416,74 @@ describe('AiReportPanel', () => {
       reason: 'stream-interrupted',
     });
   });
+
+  it.each([
+    [
+      'aborted event',
+      'aborted',
+      '## 数据摘要与截止日期\n有效内容。\n## 未批准章节',
+      'unknown-heading',
+    ],
+    [
+      'provider error',
+      'error',
+      '## 数据摘要与截止日期\n有效内容。\n## 数据摘要与截止日期',
+      'duplicate-heading',
+    ],
+    ['unexpected EOF', 'eof', '## 技术结构与支持观察', 'out-of-order-heading'],
+    ['thrown stream', 'throw', '未批准的前言', 'nonempty-preamble'],
+  ] as const)(
+    'finalizes a pending structural violation before handling %s',
+    async (_name, terminal, pendingText, contractFailure) => {
+      const user = userEvent.setup();
+      const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+      render(
+        <AiReportPanel
+          context={reportContext()}
+          settings={SETTINGS}
+          stream={interruptedStream(pendingText, terminal)}
+          onDraftReport={onDraftReport}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+      expect(await screen.findByText('未完成草稿 · 响应未通过七章节契约校验')).toBeVisible();
+      expect(onDraftReport).toHaveBeenCalledOnce();
+      expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+        status: 'draft',
+        reason: 'contract-invalid',
+        contractFailure,
+      });
+    },
+  );
+
+  it.each([
+    ['aborted', 'cancelled'],
+    ['error', 'stream-interrupted'],
+    ['eof', 'stream-interrupted'],
+    ['throw', 'stream-interrupted'],
+  ] as const)(
+    'keeps a valid partial report as %s when only later approved sections are absent',
+    async (terminal, reason) => {
+      const user = userEvent.setup();
+      const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+      render(
+        <AiReportPanel
+          context={reportContext()}
+          settings={SETTINGS}
+          stream={interruptedStream('## 数据摘要与截止日期\n有效但未完成的第一节。', terminal)}
+          onDraftReport={onDraftReport}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+      await waitFor(() => expect(onDraftReport).toHaveBeenCalledOnce());
+      expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({ status: 'draft', reason });
+      expect(onDraftReport.mock.calls[0]?.[0].contractFailure).toBeUndefined();
+    },
+  );
 
   it('binds streaming, completed output, and saving to the generation snapshot', async () => {
     const user = userEvent.setup();

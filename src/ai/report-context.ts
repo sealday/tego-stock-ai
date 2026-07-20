@@ -7,6 +7,7 @@ export const MAX_REPORT_CONTEXT_BYTES = 200 * 1024;
 
 const nullableMetric = z.number().finite().nullable();
 const nonemptyString = z.string().trim().min(1);
+const freshnessSchema = z.enum(['fresh', 'stale']);
 
 const scoreSignalSchema = z.strictObject({
   score: nullableMetric,
@@ -114,6 +115,13 @@ const reportContextSchema = z
       quality: z.string().date().nullable(),
     }),
     cutoff: z.string().date(),
+    freshness: z.strictObject({
+      workspace: freshnessSchema,
+      overview: freshnessSchema.nullable(),
+      history: freshnessSchema.nullable(),
+      fundamentals: freshnessSchema.nullable(),
+      marketStatus: freshnessSchema.nullable(),
+    }),
     source: nonemptyString,
     limitations: z.array(nonemptyString),
   })
@@ -157,6 +165,60 @@ const reportContextSchema = z
       }
     }
 
+    const resourceMetrics = {
+      overview: [
+        ...Object.values(value.price),
+        value.fundamentals.peTtm,
+        value.fundamentals.pb,
+        value.fundamentals.totalMarketValueCny,
+      ],
+      history: Object.values(value.technical),
+      fundamentals: [
+        value.fundamentals.roe,
+        value.fundamentals.grossMargin,
+        value.fundamentals.revenueGrowth,
+        value.fundamentals.profitGrowth,
+        value.fundamentals.operatingCashToNetProfit,
+        value.fundamentals.debtToAssets,
+      ],
+    } as const;
+    for (const resource of ['overview', 'history', 'fundamentals'] as const) {
+      if (
+        resourceMetrics[resource].some((metric) => metric !== null) &&
+        value.cutoffs[resource] === null
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: `Populated ${resource} metrics require their resource cutoff`,
+          path: ['cutoffs', resource],
+        });
+      }
+    }
+
+    const signalResources = {
+      trend: 'history',
+      valuation: 'overview',
+      quality: 'fundamentals',
+    } as const;
+    for (const signal of ['trend', 'valuation', 'quality'] as const) {
+      const resource = signalResources[signal];
+      const signalCutoff = value.signals[signal].cutoff;
+      if (signalCutoff !== null && signalCutoff !== value.cutoffs[resource]) {
+        context.addIssue({
+          code: 'custom',
+          message: `${signal} signal cutoff must equal the ${resource} resource cutoff`,
+          path: ['signals', signal, 'cutoff'],
+        });
+      }
+      if (value.signals[signal].score !== null && signalCutoff === null) {
+        context.addIssue({
+          code: 'custom',
+          message: `Populated ${signal} signal requires a resource cutoff`,
+          path: ['signals', signal, 'cutoff'],
+        });
+      }
+    }
+
     const includedCutoffs = Object.values(value.cutoffs).filter(
       (cutoff): cutoff is string => cutoff !== null,
     );
@@ -174,8 +236,9 @@ export type ReportContext = z.infer<typeof reportContextSchema>;
 
 export function createWorkspaceReportContext(state: StockWorkspaceState): ReportContext | null {
   const overview = state.overview.status === 'success' ? state.overview.envelope : null;
+  const history = state.history.status === 'success' ? state.history.envelope : null;
   const fundamentals = state.fundamentals.status === 'success' ? state.fundamentals.envelope : null;
-  const technical = state.analysis.technical;
+  const technical = history === null ? null : state.analysis.technical;
   const price = {
     close: overview?.data.close ?? null,
     previousClose: overview?.data.previousClose ?? null,
@@ -202,12 +265,20 @@ export function createWorkspaceReportContext(state: StockWorkspaceState): Report
     realizedVolatility20: latestSeriesValue(technical?.realizedVolatility20),
     maximumDrawdown: technical?.drawdown.maximum ?? null,
   };
-  const trendSignal = reportSignal(state.analysis.trend, 'trendSource');
-  const valuationSignal = reportSignal(state.analysis.valuation, 'valuationSource');
-  const qualitySignal = reportSignal(state.analysis.quality, 'qualitySource');
+  const trendSignal = reportSignal(state.analysis.trend, 'trendSource', history?.asOf ?? null);
+  const valuationSignal = reportSignal(
+    state.analysis.valuation,
+    'valuationSource',
+    overview?.asOf ?? null,
+  );
+  const qualitySignal = reportSignal(
+    state.analysis.quality,
+    'qualitySource',
+    fundamentals?.asOf ?? null,
+  );
   const cutoffs = {
     overview: overview?.asOf ?? null,
-    history: state.history.status === 'success' ? state.history.envelope.asOf : null,
+    history: history?.asOf ?? null,
     fundamentals: fundamentals?.asOf ?? null,
     trend: trendSignal.cutoff,
     valuation: valuationSignal.cutoff,
@@ -310,6 +381,14 @@ export function createWorkspaceReportContext(state: StockWorkspaceState): Report
     ],
     cutoffs,
     cutoff,
+    freshness: {
+      workspace: state.freshness,
+      overview: overview?.freshness ?? null,
+      history: history?.freshness ?? null,
+      fundamentals: fundamentals?.freshness ?? null,
+      marketStatus:
+        state.marketStatus.status === 'success' ? state.marketStatus.envelope.freshness : null,
+    },
     source: state.source,
     limitations: [
       ...workspaceLimitations(state),
@@ -337,8 +416,12 @@ export function validateReportContext(value: unknown): ReportContext {
   return reportContextSchema.parse(value);
 }
 
-function reportSignal(score: ExplainableScore | null, missingInput: string) {
-  if (score === null) {
+function reportSignal(
+  score: ExplainableScore | null,
+  missingInput: string,
+  resourceCutoff: string | null,
+) {
+  if (score === null || resourceCutoff === null || score.cutoff !== resourceCutoff) {
     return {
       score: null,
       band: null,

@@ -1,6 +1,5 @@
 export interface AiClientConfiguration {
   readonly baseUrl: string;
-  readonly applicationOrigin?: string;
   readonly model: string;
   readonly apiKey: string;
   readonly signal: AbortSignal;
@@ -64,11 +63,8 @@ export function buildChatCompletionsUrl(
   }
   if (applicationOrigin !== undefined) {
     const applicationUrl = new URL(applicationOrigin);
-    if (
-      url.origin === applicationUrl.origin &&
-      (url.pathname === '/api' || url.pathname.startsWith('/api/'))
-    ) {
-      throw new TypeError('AI base URL must not use the application API');
+    if (url.origin === applicationUrl.origin) {
+      throw new TypeError('AI base URL must not use the application origin');
     }
   }
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHost(url.hostname))) {
@@ -83,9 +79,11 @@ export function buildChatCompletionsUrl(
 export function createAiClient(
   configuration: AiClientConfiguration,
   fetchClient: AiFetchClient = fetch,
+  applicationOrigin = runtimeApplicationOrigin(),
 ): AiClient {
   return {
-    stream: (messages) => streamChatCompletion(configuration, messages, fetchClient),
+    stream: (messages) =>
+      streamChatCompletion(configuration, messages, fetchClient, applicationOrigin),
   };
 }
 
@@ -93,6 +91,7 @@ async function* streamChatCompletion(
   configuration: AiClientConfiguration,
   messages: readonly AiChatMessage[],
   fetchClient: AiFetchClient,
+  applicationOrigin: string | undefined,
 ): AsyncGenerator<AiStreamEvent, void> {
   if (configuration.signal.aborted) {
     yield { type: 'aborted' };
@@ -101,7 +100,7 @@ async function* streamChatCompletion(
 
   let requestUrl: string;
   try {
-    requestUrl = buildChatCompletionsUrl(configuration.baseUrl, configuration.applicationOrigin);
+    requestUrl = buildChatCompletionsUrl(configuration.baseUrl, applicationOrigin);
     if (configuration.model.trim().length === 0 || configuration.apiKey.trim().length === 0) {
       throw new TypeError('Model and API key are required');
     }

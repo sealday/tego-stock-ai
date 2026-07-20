@@ -240,22 +240,26 @@ function AiReportWorkspace({
   readonly onDraftReport: (report: DraftAiReport) => void;
 }) {
   const context = createWorkspaceReportContext(state);
+  const retainedContext = useRef(context);
+  if (context !== null) {
+    retainedContext.current = context;
+  }
+  const reportContext = context ?? retainedContext.current;
 
   return (
     <div className="ai-report-workspace">
       {active ? <AiSettings value={settings} onChange={onSettingsChange} /> : null}
-      {context === null ? (
-        active ? (
-          <section className="workspace-panel" aria-labelledby="ai-report-heading">
-            <p className="panel-kicker">等待确定性上下文</p>
-            <h2 id="ai-report-heading">AI 报告</h2>
-            <p>数据截止日期尚不可用。确定性面板仍可使用，报告生成将在上下文完整后启用。</p>
-          </section>
-        ) : null
-      ) : (
+      {context === null && active ? (
+        <section className="workspace-panel" aria-labelledby="ai-report-heading">
+          <p className="panel-kicker">等待确定性上下文</p>
+          <h2 id="ai-report-heading">AI 报告</h2>
+          <p>数据截止日期尚不可用。确定性面板仍可使用，报告生成将在上下文完整后启用。</p>
+        </section>
+      ) : null}
+      {reportContext === null ? null : (
         <AiReportPanel
-          active={active}
-          context={context}
+          active={active && context !== null}
+          context={reportContext}
           settings={settings}
           onSaveReport={onSaveReport}
           onDraftReport={onDraftReport}

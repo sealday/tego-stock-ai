@@ -35,6 +35,13 @@ export function DeterministicContext({ context }: { readonly context: ReportCont
         <p>估值评分数据 {formatCutoff(context.cutoffs.valuation)}</p>
         <p>质量评分数据 {formatCutoff(context.cutoffs.quality)}</p>
       </div>
+      <div className="ai-report__freshness" role="group" aria-label="数据新鲜度明细">
+        <p>整体 {formatFreshness(context.freshness.workspace)}</p>
+        <p>行情 {formatFreshness(context.freshness.overview)}</p>
+        <p>历史 {formatFreshness(context.freshness.history)}</p>
+        <p>基本面 {formatFreshness(context.freshness.fundamentals)}</p>
+        <p>市场快照 {formatFreshness(context.freshness.marketStatus)}</p>
+      </div>
       <div className="ai-report__signal-row">
         <p>趋势评分 {formatScore(context.signals.trend.score)}</p>
         <p>估值评分 {formatScore(context.signals.valuation.score)}</p>
@@ -102,6 +109,13 @@ function ScoreMissingInputs({
 
 function formatCutoff(cutoff: string | null): string {
   return cutoff ?? '不可用';
+}
+
+function formatFreshness(freshness: 'fresh' | 'stale' | null): string {
+  if (freshness === null) {
+    return '不可用';
+  }
+  return freshness === 'fresh' ? '新鲜' : '延迟';
 }
 
 function formatMetric(value: number | null): string {

@@ -2,6 +2,7 @@ import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-li
 import { createChart } from 'lightweight-charts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { REPORT_SECTION_HEADINGS } from '../../src/ai/report-contract';
 import { StockWorkspace } from '../../src/components/workspace/StockWorkspace';
 import {
   isoDate,
@@ -210,6 +211,41 @@ function freshState(): StockWorkspaceState {
   };
 }
 
+function stateWithoutReportContext(): StockWorkspaceState {
+  return {
+    ...readyState(),
+    cutoff: null,
+    dataStatus: 'loading',
+    overview: { status: 'loading' },
+    history: { status: 'loading' },
+    fundamentals: { status: 'loading' },
+    marketStatus: { status: 'loading' },
+    analysis: createWorkspaceAnalysis({ overview: null, history: null, fundamentals: null }),
+  };
+}
+
+function differentReadyState(): StockWorkspaceState {
+  const state = readyState();
+  if (state.overview.status !== 'success') {
+    throw new Error('Expected an overview fixture');
+  }
+  return {
+    ...state,
+    code: stockCode('000001.SZ'),
+    overview: {
+      status: 'success',
+      envelope: {
+        ...state.overview.envelope,
+        data: {
+          ...state.overview.envelope.data,
+          code: stockCode('000001.SZ'),
+          name: '平安银行',
+        },
+      },
+    },
+  };
+}
+
 type WorkspaceEndpoint = 'overview' | 'history' | 'fundamentals' | 'marketStatus';
 
 function validWorkspaceBodies(): Record<WorkspaceEndpoint, MarketEnvelope<unknown>> {
@@ -303,6 +339,103 @@ describe('StockWorkspace', () => {
       expect(screen.getByText('当前页面会话已保留 1 份完整报告或未完成草稿。')).toBeVisible();
       expect(screen.queryByRole('button', { name: '保存完整报告' })).toBeNull();
       expect(fetchClient).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps an in-flight report mounted across a non-null to null to non-null context transition', async () => {
+    const encoder = new TextEncoder();
+    let closeStream: (() => void) | undefined;
+    const fetchClient = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { content: '## 数据摘要与截止日期\n来自贵州茅台快照的草稿。' } }] })}\n\n`,
+                ),
+              );
+              closeStream = () => {
+                try {
+                  controller.close();
+                } catch {
+                  // A remount regression cancels the stream before this assertion can close it.
+                }
+              };
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchClient);
+
+    try {
+      const { rerender } = render(<StockWorkspace state={readyState()} />);
+      fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+      fireEvent.change(screen.getByLabelText('模型标识符'), {
+        target: { value: 'research-model' },
+      });
+      fireEvent.change(screen.getByLabelText('API key'), {
+        target: { value: 'sk-session-only' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+      expect(await screen.findByText('来自贵州茅台快照的草稿。')).toBeVisible();
+      rerender(<StockWorkspace state={stateWithoutReportContext()} />);
+      expect(screen.getByText('等待确定性上下文')).toBeVisible();
+
+      await act(async () => {
+        closeStream?.();
+      });
+      expect(
+        await screen.findByText('当前页面会话已保留 1 份完整报告或未完成草稿。'),
+      ).toBeVisible();
+
+      rerender(<StockWorkspace state={differentReadyState()} />);
+      expect(await screen.findByText('未完成草稿 · 流式响应中断')).toBeVisible();
+      expect(screen.getByText('贵州茅台 · 600519.SH')).toBeVisible();
+      expect(screen.queryByText('平安银行 · 000001.SZ')).toBeNull();
+      expect(fetchClient).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a completed unsaved report across a nullable context transition', async () => {
+    const report = REPORT_SECTION_HEADINGS.map((heading) => `## ${heading}\n${heading}内容。`).join(
+      '\n',
+    );
+    const fetchClient = vi.fn(
+      async () =>
+        new Response(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: report } }] })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchClient);
+
+    try {
+      const { rerender } = render(<StockWorkspace state={readyState()} />);
+      fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+      fireEvent.change(screen.getByLabelText('模型标识符'), {
+        target: { value: 'research-model' },
+      });
+      fireEvent.change(screen.getByLabelText('API key'), {
+        target: { value: 'sk-session-only' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+      expect(await screen.findByText('报告已完成')).toBeVisible();
+
+      rerender(<StockWorkspace state={stateWithoutReportContext()} />);
+      expect(screen.getByText('等待确定性上下文')).toBeVisible();
+      rerender(<StockWorkspace state={differentReadyState()} />);
+
+      expect(screen.getByText('报告已完成')).toBeVisible();
+      expect(screen.getByRole('button', { name: '保存完整报告' })).toBeVisible();
+      expect(screen.getByText('贵州茅台 · 600519.SH')).toBeVisible();
+      expect(screen.queryByText('平安银行 · 000001.SZ')).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }

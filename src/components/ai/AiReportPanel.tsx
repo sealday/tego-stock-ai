@@ -10,6 +10,7 @@ import {
   REPORT_SECTION_HEADINGS,
   createIncrementalReportParser,
   createReportMessages,
+  type FinalReportParseResult,
   validateReportContext,
   type ReportContext,
   type ReportSection,
@@ -69,6 +70,7 @@ const browserReportStreamer: AiReportStreamer = (configuration, messages) =>
   createAiClient(configuration).stream(messages);
 
 const currentTime = () => new Date();
+const CONTRACT_INVALID_MESSAGE = 'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。';
 
 export function AiReportPanel({
   context,
@@ -128,7 +130,6 @@ export function AiReportPanel({
       context: generationContext,
       settings,
       rawText: '',
-      sections: emptySections(),
       draftDelivered: false,
     };
     setPhase('streaming');
@@ -151,7 +152,6 @@ export function AiReportPanel({
         const currentGeneration = activeGeneration.current;
         if (currentGeneration?.requestId === requestId) {
           currentGeneration.rawText = text;
-          currentGeneration.sections = sections;
         }
         setVisibleSections(sections);
       },
@@ -194,12 +194,17 @@ export function AiReportPanel({
     generationId.current += 1;
     currentGeneration.controller.abort();
     activeController.current = null;
+    const parsed = finalizeAggregate(currentGeneration.rawText);
+    const contractViolation = isInterruptedContractViolation(parsed);
     const draft = createDraftReport({
       context: currentGeneration.context,
       settings: currentGeneration.settings,
       rawText: currentGeneration.rawText,
-      sections: currentGeneration.sections,
-      reason: 'cancelled',
+      sections: parsed.sections,
+      reason: contractViolation ? 'contract-invalid' : 'cancelled',
+      ...(contractViolation
+        ? { contractFailure: parsed.reason, errorMessage: CONTRACT_INVALID_MESSAGE }
+        : {}),
       now,
     });
     if (!currentGeneration.draftDelivered) {
@@ -208,8 +213,8 @@ export function AiReportPanel({
     }
     activeGeneration.current = null;
     setVisibleSections(draft.sections);
-    setDraftReason('生成已取消');
-    setErrorMessage(null);
+    setDraftReason(contractViolation ? '响应未通过七章节契约校验' : '生成已取消');
+    setErrorMessage(draft.errorMessage ?? null);
     setPhase('draft');
   };
 
@@ -334,7 +339,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
               sections: parsed.sections,
               reason: 'contract-invalid',
               contractFailure: parsed.reason,
-              errorMessage: 'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。',
+              errorMessage: CONTRACT_INVALID_MESSAGE,
               now: callbacks.now,
             }),
             '响应未通过七章节契约校验',
@@ -366,31 +371,43 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
               sections: parsed.sections,
               reason: 'contract-invalid',
               contractFailure: parsed.reason,
-              errorMessage: 'AI 返回内容无效：必须且只能包含按顺序排列的七个批准章节。',
+              errorMessage: CONTRACT_INVALID_MESSAGE,
               now: callbacks.now,
             }),
             '响应未通过七章节契约校验',
           );
         }
       } else if (event.type === 'aborted') {
+        const parsed = parser.finish();
+        if (isInterruptedContractViolation(parsed)) {
+          callbacks.controller.abort();
+          deliverContractInvalidDraft(callbacks, aggregate, parsed);
+          return;
+        }
         callbacks.onDraft(
           createDraftReport({
             context: callbacks.context,
             settings: callbacks.settings,
             rawText: aggregate,
-            sections: parser.snapshot(),
+            sections: parsed.sections,
             reason: 'cancelled',
             now: callbacks.now,
           }),
           '生成已取消',
         );
       } else if (aggregate.length > 0) {
+        const parsed = parser.finish();
+        if (isInterruptedContractViolation(parsed)) {
+          callbacks.controller.abort();
+          deliverContractInvalidDraft(callbacks, aggregate, parsed);
+          return;
+        }
         callbacks.onDraft(
           createDraftReport({
             context: callbacks.context,
             settings: callbacks.settings,
             rawText: aggregate,
-            sections: parser.snapshot(),
+            sections: parsed.sections,
             reason: 'stream-interrupted',
             errorMessage: event.message,
             now: callbacks.now,
@@ -398,6 +415,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
           '流式响应中断',
         );
       } else {
+        parser.finish();
         callbacks.onError(event.message);
       }
       return;
@@ -405,12 +423,18 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
 
     if (!terminalEvent && callbacks.isActive()) {
       if (aggregate.length > 0) {
+        const parsed = parser.finish();
+        if (isInterruptedContractViolation(parsed)) {
+          callbacks.controller.abort();
+          deliverContractInvalidDraft(callbacks, aggregate, parsed);
+          return;
+        }
         callbacks.onDraft(
           createDraftReport({
             context: callbacks.context,
             settings: callbacks.settings,
             rawText: aggregate,
-            sections: parser.snapshot(),
+            sections: parsed.sections,
             reason: 'stream-interrupted',
             errorMessage: 'AI 响应流意外中断。',
             now: callbacks.now,
@@ -418,6 +442,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
           '流式响应中断',
         );
       } else {
+        parser.finish();
         callbacks.onError('AI 响应流意外中断。');
       }
     }
@@ -426,12 +451,18 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
       return;
     }
     if (aggregate.length > 0) {
+      const parsed = parser.finish();
+      if (isInterruptedContractViolation(parsed)) {
+        callbacks.controller.abort();
+        deliverContractInvalidDraft(callbacks, aggregate, parsed);
+        return;
+      }
       callbacks.onDraft(
         createDraftReport({
           context: callbacks.context,
           settings: callbacks.settings,
           rawText: aggregate,
-          sections: parser.snapshot(),
+          sections: parsed.sections,
           reason: 'stream-interrupted',
           errorMessage: '无法连接 AI 提供商，请稍后重试。',
           now: callbacks.now,
@@ -439,11 +470,44 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
         '流式响应中断',
       );
     } else {
+      parser.finish();
       callbacks.onError('无法连接 AI 提供商，请稍后重试。');
     }
   } finally {
     callbacks.onFinished();
   }
+}
+
+function isInterruptedContractViolation(
+  result: FinalReportParseResult,
+): result is Extract<FinalReportParseResult, { readonly status: 'invalid' }> {
+  return result.status === 'invalid' && result.reason !== 'incomplete-report';
+}
+
+function finalizeAggregate(rawText: string): FinalReportParseResult {
+  const parser = createIncrementalReportParser();
+  const streamed = parser.push(rawText);
+  return streamed.status === 'invalid' ? streamed : parser.finish();
+}
+
+function deliverContractInvalidDraft(
+  callbacks: GenerationCallbacks,
+  rawText: string,
+  result: Extract<FinalReportParseResult, { readonly status: 'invalid' }>,
+): void {
+  callbacks.onDraft(
+    createDraftReport({
+      context: callbacks.context,
+      settings: callbacks.settings,
+      rawText,
+      sections: result.sections,
+      reason: 'contract-invalid',
+      contractFailure: result.reason,
+      errorMessage: CONTRACT_INVALID_MESSAGE,
+      now: callbacks.now,
+    }),
+    '响应未通过七章节契约校验',
+  );
 }
 
 interface ActiveGeneration {
@@ -452,7 +516,6 @@ interface ActiveGeneration {
   readonly context: ReportContext;
   readonly settings: AiProviderSettings;
   rawText: string;
-  sections: readonly ReportSection[];
   draftDelivered: boolean;
 }
 

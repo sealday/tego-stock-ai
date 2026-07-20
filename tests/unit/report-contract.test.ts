@@ -93,6 +93,13 @@ function validContext(): ReportContext {
       quality: '2026-07-15',
     },
     cutoff: '2026-07-17',
+    freshness: {
+      workspace: 'stale',
+      overview: 'stale',
+      history: 'fresh',
+      fundamentals: 'fresh',
+      marketStatus: 'stale',
+    },
     source: 'Tushare Pro',
     limitations: ['仅包含历史日线收盘数据', '估值参考样本不足'],
   };
@@ -227,11 +234,19 @@ describe('report context contract', () => {
       valuation: '2026-07-17',
       quality: '2026-07-15',
     });
+    expect(context.freshness).toEqual({
+      workspace: 'stale',
+      overview: 'stale',
+      history: 'fresh',
+      fundamentals: 'fresh',
+      marketStatus: 'stale',
+    });
     expect(context.source).toBe('Tushare Pro');
     expect(context.limitations).toContain('仅包含历史日线收盘数据');
     expect(messages).toHaveLength(2);
     expect(messages[1]?.content).toContain('"close":1430.4');
     expect(messages[1]?.content).toContain('"history":"2026-07-16"');
+    expect(messages[1]?.content).toContain('"workspace":"stale"');
   });
 
   it('preserves mixed source and score cutoffs and uses the latest authoritative date', () => {
@@ -249,6 +264,148 @@ describe('report context contract', () => {
     expect(context?.signals.trend.cutoff).toBe('2026-07-16');
     expect(context?.signals.valuation.cutoff).toBe('2026-07-17');
     expect(context?.signals.quality.cutoff).toBe('2026-07-15');
+    expect(context?.freshness).toEqual({
+      workspace: 'fresh',
+      overview: 'fresh',
+      history: 'fresh',
+      fundamentals: 'fresh',
+      marketStatus: null,
+    });
+  });
+
+  it('drops metrics and signals when their source resource is unavailable', () => {
+    const state = mixedDateWorkspaceState();
+    const context = createWorkspaceReportContext({
+      ...state,
+      history: { status: 'error', message: '历史不可用' },
+      fundamentals: { status: 'error', message: '基本面不可用' },
+    });
+
+    expect(context?.cutoffs.history).toBeNull();
+    expect(context?.technical).toEqual({
+      ma5: null,
+      ma20: null,
+      ma60: null,
+      rsi14: null,
+      macdHistogram: null,
+      volumeRatio20: null,
+      realizedVolatility20: null,
+      maximumDrawdown: null,
+    });
+    expect(context?.signals.trend).toMatchObject({ score: null, cutoff: null });
+    expect(context?.cutoffs.fundamentals).toBeNull();
+    expect(context?.fundamentals.roe).toBeNull();
+    expect(context?.signals.quality).toMatchObject({ score: null, cutoff: null });
+  });
+
+  it('drops a signal whose cutoff does not match its available source resource', () => {
+    const state = mixedDateWorkspaceState();
+    const context = createWorkspaceReportContext({
+      ...state,
+      analysis: {
+        ...state.analysis,
+        trend:
+          state.analysis.trend === null
+            ? null
+            : { ...state.analysis.trend, cutoff: isoDate('2026-07-14') },
+      },
+    });
+
+    expect(context?.cutoffs.history).toBe('2026-07-16');
+    expect(context?.signals.trend).toMatchObject({
+      score: null,
+      status: 'insufficient',
+      cutoff: null,
+    });
+    expect(context?.cutoffs.trend).toBeNull();
+  });
+
+  it.each([
+    ['overview', { overview: null }],
+    ['history', { history: null }],
+    ['fundamentals', { fundamentals: null }],
+  ] as const)(
+    'requires a %s cutoff when its normalized metrics are populated',
+    (_name, cutoffs) => {
+      const context = validContext();
+      expect(() =>
+        validateReportContext({
+          ...context,
+          cutoffs: { ...context.cutoffs, ...cutoffs },
+        }),
+      ).toThrow(/cutoff|provenance|source/i);
+    },
+  );
+
+  it.each([
+    ['trend', 'history', '2026-07-14'],
+    ['valuation', 'overview', '2026-07-16'],
+    ['quality', 'fundamentals', '2026-07-14'],
+  ] as const)(
+    'requires the %s signal cutoff to equal the %s resource cutoff',
+    (signal, _resource, cutoff) => {
+      const context = validContext();
+      expect(() =>
+        validateReportContext({
+          ...context,
+          signals: {
+            ...context.signals,
+            [signal]: { ...context.signals[signal], cutoff },
+          },
+          cutoffs: { ...context.cutoffs, [signal]: cutoff },
+        }),
+      ).toThrow(/cutoff|provenance|resource/i);
+    },
+  );
+
+  it('allows an unavailable overview resource when all overview-derived values are null', () => {
+    const context = validContext();
+    const overviewMetrics = new Set([
+      'close',
+      'previousClose',
+      'changePercent',
+      'peTtm',
+      'pb',
+      'totalMarketValueCny',
+      'valuationScore',
+    ]);
+    const unavailable = validateReportContext({
+      ...context,
+      price: { close: null, previousClose: null, changePercent: null },
+      fundamentals: {
+        ...context.fundamentals,
+        peTtm: null,
+        pb: null,
+        totalMarketValueCny: null,
+      },
+      signals: {
+        ...context.signals,
+        valuation: {
+          ...context.signals.valuation,
+          score: null,
+          band: null,
+          status: 'insufficient',
+          cutoff: null,
+        },
+      },
+      availability: context.availability.map((entry) =>
+        overviewMetrics.has(entry.metric)
+          ? { metric: entry.metric, status: 'missing', reason: '行情资源不可用' }
+          : entry,
+      ),
+      cutoffs: { ...context.cutoffs, overview: null, valuation: null },
+      cutoff: '2026-07-16',
+      freshness: { ...context.freshness, overview: null },
+    });
+
+    expect(unavailable.cutoffs.overview).toBeNull();
+    expect(unavailable.freshness.overview).toBeNull();
+  });
+
+  it('requires strict workspace and per-resource freshness metadata', () => {
+    const { freshness: _freshness, ...withoutFreshness } = validContext();
+
+    expect(() => validateReportContext(withoutFreshness)).toThrow(/freshness|required/i);
   });
 
   it('requires exactly one availability entry for every allowlisted metric', () => {
