@@ -1,4 +1,6 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
   "headers": [
     {
       "source": "/(.*)",
@@ -22,6 +24,12 @@
     {
       "path": "/api/cron/daily-close",
       "schedule": "30 8 * * 1-5"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }
