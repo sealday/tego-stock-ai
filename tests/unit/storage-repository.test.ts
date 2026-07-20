@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AiProviderSettings } from '../../src/ai/provider-settings';
 import type { GeneratedAiReport } from '../../src/ai/report-model';
+import { REPORT_SECTION_HEADINGS } from '../../src/ai/report-parser';
 import {
   LOCAL_DATABASE_VERSION,
   LOCAL_STORE_NAMES,
@@ -203,6 +204,58 @@ describe('LocalRepository', () => {
     await repository.close();
   });
 
+  it('binds draft sections and interruption metadata to the incremental parser result', async () => {
+    const repository = new LocalRepository({ name: databaseName('draft-contract') });
+    const validInterrupted = draftReport();
+    const completeContentDraft = draftReport({
+      rawText: completeReport().rawText,
+      sections: completeReport().sections,
+    });
+    const invalidRawText = [
+      `## ${REPORT_SECTION_HEADINGS[0]}`,
+      '第一节内容。',
+      '## 未批准章节',
+    ].join('\n');
+    const invalidSections = REPORT_SECTION_HEADINGS.map((heading, index) => ({
+      heading,
+      content: index === 0 ? '第一节内容。' : '',
+    }));
+    const validContractInvalid = draftReport({
+      rawText: invalidRawText,
+      sections: invalidSections,
+      reason: 'contract-invalid',
+      contractFailure: 'unknown-heading',
+    });
+
+    await expect(repository.saveReport(validInterrupted)).resolves.toBeDefined();
+    await expect(repository.saveReport(completeContentDraft)).resolves.toBeDefined();
+    await expect(repository.saveReport(validContractInvalid)).resolves.toBeDefined();
+
+    for (const forged of [
+      draftReport({ sections: completeReport().sections }),
+      draftReport({ contractFailure: 'incomplete-report' }),
+      draftReport({
+        rawText: invalidRawText,
+        sections: invalidSections,
+        reason: 'stream-interrupted',
+      }),
+      draftReport({
+        rawText: invalidRawText,
+        sections: invalidSections,
+        reason: 'contract-invalid',
+      }),
+      draftReport({
+        rawText: invalidRawText,
+        sections: invalidSections,
+        reason: 'contract-invalid',
+        contractFailure: 'duplicate-heading',
+      }),
+    ]) {
+      await expect(repository.saveReport(forged)).rejects.toMatchObject({ code: 'INVALID_DATA' });
+    }
+    await repository.close();
+  });
+
   it('persists a validated report snapshot that caller mutation cannot corrupt', async () => {
     const repository = new LocalRepository({
       name: databaseName('report-snapshot'),
@@ -257,6 +310,28 @@ describe('LocalRepository', () => {
         schemaVersion: 1,
         savedAt: 'not-a-date',
         report: completeReport(),
+      });
+    });
+    database.close();
+
+    const repository = new LocalRepository({ name });
+    await expect(repository.listReports()).rejects.toMatchObject({ code: 'INVALID_DATA' });
+    await repository.close();
+  });
+
+  it('rejects forged draft sections and contract metadata read from IndexedDB', async () => {
+    const name = databaseName('corrupt-draft');
+    const database = await openLocalDatabase({ name });
+    await runLocalTransaction(database, ['reports'], 'readwrite', async (transaction) => {
+      await transaction.put('reports', {
+        id: 'corrupt-draft',
+        schemaVersion: 1,
+        savedAt: '2026-07-20T02:00:00.000Z',
+        report: draftReport({
+          sections: completeReport().sections,
+          reason: 'contract-invalid',
+          contractFailure: 'unknown-heading',
+        }),
       });
     });
     database.close();

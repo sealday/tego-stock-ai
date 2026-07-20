@@ -26,9 +26,20 @@ export interface AiReportWorkspaceProps {
   readonly state: StockWorkspaceState;
   readonly active: boolean;
   readonly repository?: AiReportWorkspaceRepository | undefined;
+  readonly focusRequest?: AiReportWorkspaceFocusRequest | null | undefined;
 }
 
-export default function AiReportWorkspace({ state, active, repository }: AiReportWorkspaceProps) {
+export interface AiReportWorkspaceFocusRequest {
+  readonly id: 'saved-reports' | 'ai-settings' | 'local-privacy';
+  readonly sequence: number;
+}
+
+export default function AiReportWorkspace({
+  state,
+  active,
+  repository,
+  focusRequest,
+}: AiReportWorkspaceProps) {
   const [defaultRepository] = useState(() => new LocalRepository());
   const localRepository = repository ?? defaultRepository;
   const [settings, setSettings] = useState<AiProviderSettings>(DEFAULT_AI_PROVIDER_SETTINGS);
@@ -43,6 +54,15 @@ export default function AiReportWorkspace({ state, active, repository }: AiRepor
     retainedContext.current = context;
   }
   const reportContext = context ?? retainedContext.current;
+
+  useEffect(() => {
+    if (!active || focusRequest === null || focusRequest === undefined) {
+      return;
+    }
+    const destination = document.getElementById(focusRequest.id);
+    destination?.focus({ preventScroll: true });
+    destination?.scrollIntoView?.({ block: 'start' });
+  }, [active, focusRequest]);
 
   useEffect(() => {
     let current = true;

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef, useState, type KeyboardEvent } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
 import { WORKSPACE_TABS, type WorkspaceTabId } from '../../app/routes';
 import { formatShanghaiTimestamp, type StockWorkspaceState } from '../../hooks/use-stock-workspace';
@@ -7,6 +7,10 @@ import { FinancialTrendsPanel } from './FinancialTrendsPanel';
 import { FundamentalsPanel } from './FundamentalsPanel';
 import { OverviewPanel } from './OverviewPanel';
 import { TechnicalPanel } from './TechnicalPanel';
+import type { AiReportWorkspaceFocusRequest } from './AiReportWorkspace';
+
+const AI_DESTINATION_IDS = ['saved-reports', 'ai-settings', 'local-privacy'] as const;
+type AiDestinationId = (typeof AI_DESTINATION_IDS)[number];
 
 const AiReportWorkspace = lazy(async () => {
   const module = await import('./AiReportWorkspace');
@@ -14,8 +18,16 @@ const AiReportWorkspace = lazy(async () => {
 });
 
 export function StockWorkspace({ state }: { readonly state: StockWorkspaceState }) {
-  const [activeTab, setActiveTab] = useState<WorkspaceTabId>('overview');
-  const [aiWorkspaceActivated, setAiWorkspaceActivated] = useState(false);
+  const initialDestination = destinationFromHash(
+    typeof window === 'undefined' ? '' : window.location.hash,
+  );
+  const [activeTab, setActiveTab] = useState<WorkspaceTabId>(
+    initialDestination === null ? 'overview' : 'ai-report',
+  );
+  const [aiWorkspaceActivated, setAiWorkspaceActivated] = useState(initialDestination !== null);
+  const [focusRequest, setFocusRequest] = useState<AiReportWorkspaceFocusRequest | null>(
+    initialDestination === null ? null : { id: initialDestination, sequence: 0 },
+  );
   const tabReferences = useRef<Array<HTMLButtonElement | null>>([]);
   const name = state.overview.status === 'success' ? state.overview.envelope.data.name : state.code;
   const marketSnapshotStale =
@@ -28,6 +40,40 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
       setAiWorkspaceActivated(true);
     }
   };
+
+  useEffect(() => {
+    const reveal = (destination: AiDestinationId) => {
+      setActiveTab('ai-report');
+      setAiWorkspaceActivated(true);
+      setFocusRequest((current) => ({
+        id: destination,
+        sequence: (current?.sequence ?? 0) + 1,
+      }));
+    };
+    const revealCurrentHash = () => {
+      const destination = destinationFromHash(window.location.hash);
+      if (destination !== null) {
+        reveal(destination);
+      }
+    };
+    const revealClickedAnchor = (event: MouseEvent) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+      const anchor = event.target.closest('a');
+      const destination = destinationFromHash(anchor?.getAttribute('href') ?? '');
+      if (destination !== null) {
+        reveal(destination);
+      }
+    };
+
+    window.addEventListener('hashchange', revealCurrentHash);
+    document.addEventListener('click', revealClickedAnchor);
+    return () => {
+      window.removeEventListener('hashchange', revealCurrentHash);
+      document.removeEventListener('click', revealClickedAnchor);
+    };
+  }, []);
 
   return (
     <article
@@ -119,7 +165,11 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
           {tab.id === 'ai-report' ? (
             aiWorkspaceActivated ? (
               <Suspense fallback={<p>正在加载 AI 工作区…</p>}>
-                <AiReportWorkspace state={state} active={activeTab === tab.id} />
+                <AiReportWorkspace
+                  state={state}
+                  active={activeTab === tab.id}
+                  focusRequest={focusRequest}
+                />
               </Suspense>
             ) : null
           ) : activeTab === tab.id ? (
@@ -145,6 +195,11 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
       </footer>
     </article>
   );
+}
+
+function destinationFromHash(hash: string): AiDestinationId | null {
+  const candidate = hash.startsWith('#') ? hash.slice(1) : hash;
+  return AI_DESTINATION_IDS.find((destination) => destination === candidate) ?? null;
 }
 
 function renderActivePanel(tab: WorkspaceTabId, state: StockWorkspaceState) {

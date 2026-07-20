@@ -71,16 +71,29 @@ export function createReportMessages(value: unknown): readonly ReportMessage[] {
 }
 
 export function parseCompleteReport(text: string): readonly ReportSection[] {
-  const parser = createIncrementalReportParser();
-  const streamed = parser.push(text);
-  if (streamed.status === 'invalid') {
-    throw reportStructureError(streamed.reason);
-  }
-  const final = parser.finish();
+  const final = finalizeReportText(text);
   if (final.status === 'invalid') {
     throw reportStructureError(final.reason);
   }
   return final.sections;
+}
+
+export function finalizeReportText(text: string): FinalReportParseResult {
+  const parser = createIncrementalReportParser();
+  const streamed = parser.push(text);
+  return streamed.status === 'invalid' ? streamed : parser.finish();
+}
+
+export function isInterruptedReportContractViolation(
+  result: FinalReportParseResult,
+): result is Extract<FinalReportParseResult, { readonly status: 'invalid' }> {
+  if (result.status !== 'invalid' || result.reason === 'incomplete-report') {
+    return false;
+  }
+  if (result.reason !== 'empty-section') {
+    return true;
+  }
+  return result.sections.slice(0, -1).some((section) => section.content.length === 0);
 }
 
 export function createIncrementalReportParser(): IncrementalReportParser {

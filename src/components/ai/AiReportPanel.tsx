@@ -11,6 +11,8 @@ import {
   REPORT_SECTION_HEADINGS,
   createIncrementalReportParser,
   createReportMessages,
+  finalizeReportText,
+  isInterruptedReportContractViolation,
   type FinalReportParseResult,
   validateReportContext,
   type ReportContext,
@@ -182,7 +184,7 @@ export function AiReportPanel({
     currentGeneration.controller.abort();
     activeController.current = null;
     const parsed = finalizeAggregate(currentGeneration.rawText);
-    const contractViolation = isInterruptedContractViolation(parsed);
+    const contractViolation = isInterruptedReportContractViolation(parsed);
     const draft = createDraftReport({
       context: currentGeneration.context,
       settings: currentGeneration.settings,
@@ -322,7 +324,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
           const parsed = parser.finish();
           if (aggregate.length === 0) {
             callbacks.onError(REPORT_SIZE_LIMIT_MESSAGE);
-          } else if (isInterruptedContractViolation(parsed)) {
+          } else if (isInterruptedReportContractViolation(parsed)) {
             deliverContractInvalidDraft(callbacks, aggregate, parsed);
           } else {
             callbacks.onDraft(
@@ -394,7 +396,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
         }
       } else if (event.type === 'aborted') {
         const parsed = parser.finish();
-        if (isInterruptedContractViolation(parsed)) {
+        if (isInterruptedReportContractViolation(parsed)) {
           callbacks.controller.abort();
           deliverContractInvalidDraft(callbacks, aggregate, parsed);
           return;
@@ -412,7 +414,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
         );
       } else if (aggregate.length > 0) {
         const parsed = parser.finish();
-        if (isInterruptedContractViolation(parsed)) {
+        if (isInterruptedReportContractViolation(parsed)) {
           callbacks.controller.abort();
           deliverContractInvalidDraft(callbacks, aggregate, parsed);
           return;
@@ -439,7 +441,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
     if (!terminalEvent && callbacks.isActive()) {
       if (aggregate.length > 0) {
         const parsed = parser.finish();
-        if (isInterruptedContractViolation(parsed)) {
+        if (isInterruptedReportContractViolation(parsed)) {
           callbacks.controller.abort();
           deliverContractInvalidDraft(callbacks, aggregate, parsed);
           return;
@@ -467,7 +469,7 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
     }
     if (aggregate.length > 0) {
       const parsed = parser.finish();
-      if (isInterruptedContractViolation(parsed)) {
+      if (isInterruptedReportContractViolation(parsed)) {
         callbacks.controller.abort();
         deliverContractInvalidDraft(callbacks, aggregate, parsed);
         return;
@@ -497,22 +499,8 @@ function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function isInterruptedContractViolation(
-  result: FinalReportParseResult,
-): result is Extract<FinalReportParseResult, { readonly status: 'invalid' }> {
-  if (result.status !== 'invalid' || result.reason === 'incomplete-report') {
-    return false;
-  }
-  if (result.reason !== 'empty-section') {
-    return true;
-  }
-  return result.sections.slice(0, -1).some((section) => section.content.length === 0);
-}
-
 function finalizeAggregate(rawText: string): FinalReportParseResult {
-  const parser = createIncrementalReportParser();
-  const streamed = parser.push(rawText);
-  return streamed.status === 'invalid' ? streamed : parser.finish();
+  return finalizeReportText(rawText);
 }
 
 function deliverContractInvalidDraft(

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { createChart } from 'lightweight-charts';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { REPORT_SECTION_HEADINGS } from '../../src/ai/report-contract';
 import { StockWorkspace } from '../../src/components/workspace/StockWorkspace';
@@ -40,6 +40,10 @@ vi.mock('lightweight-charts', () => {
 
 const CODE = stockCode('600519.SH');
 const AS_OF = isoDate('2026-07-17');
+
+afterEach(() => {
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+});
 
 function envelope<T>(
   data: T,
@@ -285,6 +289,42 @@ function workspaceFetchClient(
 }
 
 describe('StockWorkspace', () => {
+  it('reveals and focuses a lazy AI destination from the initial URL hash', async () => {
+    window.history.replaceState(null, '', '#local-privacy');
+    render(<StockWorkspace state={readyState()} />);
+
+    expect(screen.getByRole('tab', { name: 'AI 报告' }).getAttribute('aria-selected')).toBe('true');
+    const destination = await screen.findByRole('heading', {
+      name: '本地隐私与数据控制',
+    });
+    expect(destination.closest('#local-privacy')).toBe(document.activeElement);
+  });
+
+  it('repeats primary anchor navigation without remounting the AI workspace state', async () => {
+    render(
+      <>
+        <a href="#ai-settings">打开 AI 设置</a>
+        <StockWorkspace state={readyState()} />
+      </>,
+    );
+
+    fireEvent.click(screen.getByRole('link', { name: '打开 AI 设置' }));
+    const model = await screen.findByLabelText('模型标识符');
+    fireEvent.change(model, { target: { value: 'retained-model' } });
+    expect(document.getElementById('ai-settings')).toBe(document.activeElement);
+
+    fireEvent.click(screen.getByRole('tab', { name: '概览' }));
+    fireEvent.click(screen.getByRole('link', { name: '打开 AI 设置' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: 'AI 报告' }).getAttribute('aria-selected')).toBe(
+        'true',
+      ),
+    );
+    expect((screen.getByLabelText('模型标识符') as HTMLInputElement).value).toBe('retained-model');
+    expect(document.getElementById('ai-settings')).toBe(document.activeElement);
+  });
+
   it('loads the optional AI workspace only after first activation', async () => {
     const { container } = render(<StockWorkspace state={readyState()} />);
 

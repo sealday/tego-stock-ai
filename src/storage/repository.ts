@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { MAX_AI_REPORT_TEXT_BYTES, buildChatCompletionsUrl } from '../ai/client';
 import {
   REPORT_SECTION_HEADINGS,
+  finalizeReportText,
+  isInterruptedReportContractViolation,
   parseCompleteReport,
   validateReportContext,
   type ReportContext,
@@ -398,6 +400,19 @@ function validateGeneratedReport(value: unknown): GeneratedAiReport {
       throw invalidStoredData(cause);
     }
     if (JSON.stringify(parsedSections) !== JSON.stringify(report.sections)) {
+      throw invalidStoredData();
+    }
+  } else {
+    const parsed = finalizeReportText(report.rawText);
+    if (JSON.stringify(parsed.sections) !== JSON.stringify(report.sections)) {
+      throw invalidStoredData();
+    }
+    const contractViolation = isInterruptedReportContractViolation(parsed);
+    if (report.reason === 'contract-invalid') {
+      if (!contractViolation || report.contractFailure !== parsed.reason) {
+        throw invalidStoredData();
+      }
+    } else if (contractViolation || report.contractFailure !== undefined) {
       throw invalidStoredData();
     }
   }

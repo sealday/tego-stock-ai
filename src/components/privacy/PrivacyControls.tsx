@@ -82,6 +82,7 @@ export function PrivacyControls({
       id="local-privacy"
       className="workspace-panel privacy-controls"
       aria-labelledby="local-privacy-heading"
+      tabIndex={-1}
     >
       <div className="panel-heading-row">
         <div>

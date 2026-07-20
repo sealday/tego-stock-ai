@@ -71,6 +71,7 @@ export function SavedReports({ repository, refreshKey = 0 }: SavedReportsProps) 
       id="saved-reports"
       className="workspace-panel saved-reports"
       aria-labelledby="saved-reports-heading"
+      tabIndex={-1}
     >
       <div className="panel-heading-row">
         <div>

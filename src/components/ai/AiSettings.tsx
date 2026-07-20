@@ -52,7 +52,12 @@ export function AiSettings({
     };
 
   return (
-    <section id="ai-settings" className="ai-settings" aria-labelledby="ai-settings-heading">
+    <section
+      id="ai-settings"
+      className="ai-settings"
+      aria-labelledby="ai-settings-heading"
+      tabIndex={-1}
+    >
       <div className="panel-heading-row">
         <div>
           <p className="panel-kicker">浏览器内 BYOK</p>
