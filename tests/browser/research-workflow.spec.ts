@@ -25,10 +25,19 @@ test('completes browser-only A-share research and reloads the saved report local
 
   await expect(page.getByText('Tushare Pro', { exact: true }).first()).toBeVisible();
   await expect(page.getByText(FIXTURE_CUTOFF, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('趋势评分')).toBeVisible();
-  await expect(page.getByText('100.0 / 100', { exact: true })).toBeVisible();
-  await expect(page.getByText('84.8 / 100', { exact: true })).toBeVisible();
-  await expect(page.getByText('参考样本不足（0/4）', { exact: true }).first()).toBeVisible();
+  const trendScoreCard = page.getByRole('heading', { name: '趋势评分', exact: true }).locator('..');
+  await expect(trendScoreCard.getByText('100.0 / 100', { exact: true })).toBeVisible();
+  await expect(trendScoreCard.getByText(`数据截止 ${FIXTURE_CUTOFF}`)).toBeVisible();
+  const qualityScoreCard = page
+    .getByRole('heading', { name: '财务质量', exact: true })
+    .locator('..');
+  await expect(qualityScoreCard.getByText('84.8 / 100', { exact: true })).toBeVisible();
+  await expect(qualityScoreCard.getByText(`数据截止 ${FIXTURE_CUTOFF}`)).toBeVisible();
+  const valuationScoreCard = page
+    .getByRole('heading', { name: '估值位置', exact: true })
+    .locator('..');
+  await expect(valuationScoreCard.getByText('参考样本不足（0/4）', { exact: true })).toHaveCount(2);
+  await expect(valuationScoreCard.getByText(`数据截止 ${FIXTURE_CUTOFF}`)).toBeVisible();
   await expect(page.getByText('1,430.2').first()).toBeVisible();
 
   const viewHeadings = [
