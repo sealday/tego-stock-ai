@@ -117,6 +117,13 @@ test('rejects malformed provider requests before opening an SSE stream', async (
   installFixtureRoutes,
 }) => {
   const probe = await installFixtureRoutes();
+  const wrongPathPreflight = await fetch(`${probe.aiBaseUrl}/v1/not-chat`, {
+    method: 'OPTIONS',
+    headers: { origin: probe.previewOrigin },
+  });
+  expect(wrongPathPreflight.status).toBe(404);
+  expect(await wrongPathPreflight.text()).toBe('Not found');
+
   const validBody = {
     model: FIXTURE_AI_MODEL,
     stream: true,

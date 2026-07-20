@@ -286,13 +286,19 @@ async function handleAiFixtureRequest({
     vary: 'Origin',
   } as const;
 
+  if (requestUrl.pathname !== '/v1/chat/completions') {
+    response.writeHead(404, { ...corsHeaders, 'content-type': 'text/plain; charset=utf-8' });
+    response.end('Not found');
+    return;
+  }
+
   if (request.method === 'OPTIONS') {
     response.writeHead(204, corsHeaders);
     response.end();
     return;
   }
 
-  if (request.method !== 'POST' || requestUrl.pathname !== '/v1/chat/completions') {
+  if (request.method !== 'POST') {
     response.writeHead(404, { ...corsHeaders, 'content-type': 'text/plain; charset=utf-8' });
     response.end('Not found');
     return;
