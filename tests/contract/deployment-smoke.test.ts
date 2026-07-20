@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 type SmokeFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type RouteFixture = Response | readonly Response[];
+type RouteFixtures = Map<string, RouteFixture>;
 
 interface DeploymentSmokeModule {
   runDeploymentSmoke(options: {
@@ -46,8 +48,32 @@ function jsonResponse(body: unknown, init: ResponseInit): Response {
   return new Response(JSON.stringify(body), { ...init, headers });
 }
 
-function successfulRoutes(): Map<string, Response> {
-  return new Map([
+function stockResponse(
+  vercelCache: string,
+  cacheControl = 'public, max-age=300, stale-while-revalidate=604800',
+  data: unknown = [{ code: '600519.SH', name: '贵州茅台', pinyinAbbreviation: 'GZMT' }],
+): Response {
+  return jsonResponse(
+    {
+      data,
+      asOf: '2026-07-18',
+      source: 'Tushare Pro',
+      freshness: 'fresh',
+      availability: {},
+      limitations: ['Daily-close data only'],
+    },
+    {
+      status: 200,
+      headers: {
+        'cache-control': cacheControl,
+        'x-vercel-cache': vercelCache,
+      },
+    },
+  );
+}
+
+function successfulRoutes(): RouteFixtures {
+  return new Map<string, RouteFixture>([
     [
       'GET /api/health',
       jsonResponse(
@@ -76,26 +102,7 @@ function successfulRoutes(): Map<string, Response> {
         { status: 400, headers: { 'cache-control': 'no-store' } },
       ),
     ],
-    [
-      'GET /api/stocks/search?q=600519',
-      jsonResponse(
-        {
-          data: [{ code: '600519.SH', name: '贵州茅台', pinyinAbbreviation: 'GZMT' }],
-          asOf: '2026-07-18',
-          source: 'Tushare Pro',
-          freshness: 'fresh',
-          availability: {},
-          limitations: ['Daily-close data only'],
-        },
-        {
-          status: 200,
-          headers: {
-            'cache-control': 'public, max-age=300, stale-while-revalidate=604800',
-            'x-vercel-cache': 'MISS',
-          },
-        },
-      ),
-    ],
+    ['GET /api/stocks/search?q=600519', [stockResponse('MISS'), stockResponse('HIT')]],
     [
       'GET /deployment-smoke/spa-fallback',
       new Response('<!doctype html><html><body><div id="root"></div></body></html>', {
@@ -120,7 +127,8 @@ function successfulRoutes(): Map<string, Response> {
   ]);
 }
 
-function createRouteFetch(routes: Map<string, Response>, requests: RecordedRequest[]): SmokeFetch {
+function createRouteFetch(routes: RouteFixtures, requests: RecordedRequest[]): SmokeFetch {
+  const calls = new Map<string, number>();
   return async (input, init = {}) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -132,7 +140,7 @@ function createRouteFetch(routes: Map<string, Response>, requests: RecordedReque
       url,
     });
     const key = routeKey(request.method, url);
-    const response = routes.get(key);
+    const response = takeRouteResponse(routes, calls, key);
 
     if (response === undefined) {
       throw new Error(`Unexpected deployment-smoke request: ${request.method} ${url.pathname}`);
@@ -140,6 +148,20 @@ function createRouteFetch(routes: Map<string, Response>, requests: RecordedReque
 
     return response.clone();
   };
+}
+
+function takeRouteResponse(
+  routes: RouteFixtures,
+  calls: Map<string, number>,
+  key: string,
+): Response | undefined {
+  const fixture = routes.get(key);
+  if (fixture === undefined || fixture instanceof Response) {
+    return fixture;
+  }
+  const index = calls.get(key) ?? 0;
+  calls.set(key, index + 1);
+  return fixture[index];
 }
 
 function routeKey(method: string, url: URL): string {
@@ -150,10 +172,11 @@ function routeKey(method: string, url: URL): string {
 
 async function withDeploymentServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
   const routes = successfulRoutes();
+  const calls = new Map<string, number>();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      const fixture = routes.get(routeKey(request.method ?? 'GET', url));
+      const fixture = takeRouteResponse(routes, calls, routeKey(request.method ?? 'GET', url));
       if (fixture === undefined) {
         response.writeHead(404, { 'content-type': 'text/plain' });
         response.end('fixture missing');
@@ -230,14 +253,18 @@ describe('deployment smoke', () => {
       '/api/health',
       '/api/stocks/search',
       '/api/stocks/search',
+      '/api/stocks/search',
       '/deployment-smoke/spa-fallback',
       '/api/cron/daily-close',
     ]);
     expect(requests.every(({ redirect }) => redirect === 'error')).toBe(true);
-    const stockProbe = requests[2];
-    expect(stockProbe?.url.searchParams.get('q')).toBe('600519');
-    expect(stockProbe?.url.searchParams.get('deployment-smoke')).toMatch(/^[0-9a-f-]{36}$/);
-    expect(stockProbe?.headers.get('pragma')).toBe('no-cache');
+    const firstStockProbe = requests[2];
+    const secondStockProbe = requests[3];
+    expect(firstStockProbe?.url.searchParams.get('q')).toBe('600519');
+    expect(firstStockProbe?.url.searchParams.get('deployment-smoke')).toMatch(/^[0-9a-f-]{36}$/);
+    expect(firstStockProbe?.url.href).toBe(secondStockProbe?.url.href);
+    expect(firstStockProbe?.headers.get('pragma')).toBe('no-cache');
+    expect(secondStockProbe?.headers.get('pragma')).toBeNull();
     const cronRequest = requests.at(-1);
     expect(cronRequest?.headers.get('authorization')).toBeNull();
   });
@@ -302,6 +329,24 @@ describe('deployment smoke', () => {
       'cache probe did not return a safe positive public cache policy',
     ],
     [
+      'valued public directive',
+      'public=shared, max-age=300',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'zero visible s-maxage',
+      'public, max-age=300, s-maxage=0',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'noninteger visible s-maxage',
+      'public, max-age=300, s-maxage=invalid',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
       'missing Vercel status',
       'public, max-age=300',
       null,
@@ -345,6 +390,37 @@ describe('deployment smoke', () => {
       ).rejects.toThrow(`Deployment smoke failed: ${expectedFailure}.`);
     },
   );
+
+  it('requires the second identical stock probe to be a shared-cache HIT', async () => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const routes = successfulRoutes();
+    routes.set('GET /api/stocks/search?q=600519', [stockResponse('MISS'), stockResponse('MISS')]);
+
+    await expect(
+      runDeploymentSmoke({
+        baseUrl: 'https://stocks.example.com',
+        fetch: createRouteFetch(routes, []),
+      }),
+    ).rejects.toThrow(
+      'Deployment smoke failed: repeat cache probe did not return a shared Vercel HIT.',
+    );
+  });
+
+  it('validates the target stock in the shared-cache HIT body', async () => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const routes = successfulRoutes();
+    routes.set('GET /api/stocks/search?q=600519', [
+      stockResponse('REVALIDATED'),
+      stockResponse('HIT', 'public, max-age=300', [{ code: '000001.SZ' }]),
+    ]);
+
+    await expect(
+      runDeploymentSmoke({
+        baseUrl: 'https://stocks.example.com',
+        fetch: createRouteFetch(routes, []),
+      }),
+    ).rejects.toThrow('Deployment smoke failed: repeat cache probe did not include 600519.SH.');
+  });
 
   it.each([
     [
@@ -680,17 +756,25 @@ describe('deployment evidence gates', () => {
       new URL('../../.github/workflows/ci.yml', import.meta.url),
       'utf8',
     );
-    const introduced = workflowJob(workflow, 'introduced-commit-policy');
-    const quality = workflowJob(workflow, 'quality');
-    const vitest = workflowJob(workflow, 'vitest');
-    const browser = workflowJob(workflow, 'playwright');
-    const visual = workflowJob(workflow, 'visual');
+    const jobs = workflowJobs(workflow);
+    expect([...jobs.keys()]).toEqual([
+      'introduced-commit-policy',
+      'quality',
+      'vitest',
+      'playwright',
+      'visual',
+    ]);
+    const introduced = requiredJob(jobs, 'introduced-commit-policy');
+    const quality = requiredJob(jobs, 'quality');
+    const vitest = requiredJob(jobs, 'vitest');
+    const browser = requiredJob(jobs, 'playwright');
+    const visual = requiredJob(jobs, 'visual');
 
     expect(workflow).toMatch(/permissions:\s*\n\s+contents: read/);
     expect(workflow).toMatch(/concurrency:[\s\S]*?cancel-in-progress: true/);
     expect(workflow).toContain('pull_request:');
     expect(workflow).not.toContain('pull_request_target:');
-    expect(workflow).not.toMatch(/\bsecrets\./);
+    expect(hasSecretReference(workflow)).toBe(false);
     expect(workflow).not.toMatch(/^\s+environment:/m);
     expect(workflow.match(/^[ \t]*permissions:/gm)).toEqual(['permissions:']);
 
@@ -701,7 +785,7 @@ describe('deployment evidence gates', () => {
       expect(job).toContain('run: npm ci');
       expect(job).not.toContain('permissions:');
       expect(job).not.toContain('environment:');
-      expect(job).not.toMatch(/\bsecrets\./);
+      expect(hasSecretReference(job)).toBe(false);
     }
 
     expect(introduced).toContain('fetch-depth: 0');
@@ -728,17 +812,45 @@ describe('deployment evidence gates', () => {
       expect(action).toMatch(/@[0-9a-f]{40}$/);
     }
   });
+
+  it.each(['${{ secrets.NAME }}', "${{ secrets['NAME'] }}", '${{ SeCrEtS [ "NAME" ] }}'])(
+    'detects forbidden CI secret reference syntax: %s',
+    (source) => {
+      expect(hasSecretReference(source)).toBe(true);
+    },
+  );
 });
 
-function workflowJob(workflow: string, name: string): string {
-  const marker = `  ${name}:\n`;
-  const start = workflow.indexOf(marker);
-  if (start < 0) {
+function workflowJobs(workflow: string): Map<string, string> {
+  const jobsMarker = '\njobs:\n';
+  const jobsStart = workflow.indexOf(jobsMarker);
+  if (jobsStart < 0) {
+    throw new Error('CI workflow is missing jobs.');
+  }
+  const jobsSource = workflow.slice(jobsStart + jobsMarker.length);
+  const matches = [...jobsSource.matchAll(/^  ([A-Za-z_][A-Za-z0-9_-]*):\n/gm)];
+  const jobs = new Map<string, string>();
+  for (const [index, match] of matches.entries()) {
+    const name = match[1];
+    const start = match.index;
+    const end = matches[index + 1]?.index ?? jobsSource.length;
+    if (name !== undefined && start !== undefined) {
+      jobs.set(name, jobsSource.slice(start, end));
+    }
+  }
+  return jobs;
+}
+
+function requiredJob(jobs: Map<string, string>, name: string): string {
+  const job = jobs.get(name);
+  if (job === undefined) {
     throw new Error(`CI workflow is missing job ${name}.`);
   }
-  const remainder = workflow.slice(start + marker.length);
-  const next = remainder.search(/^  [a-z][a-z0-9-]*:\n/m);
-  return next < 0 ? workflow.slice(start) : workflow.slice(start, start + marker.length + next);
+  return job;
+}
+
+function hasSecretReference(source: string): boolean {
+  return /\bsecrets\s*(?:\.|\[\s*['"])/i.test(source);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

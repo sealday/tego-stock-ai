@@ -39,12 +39,10 @@ export async function runDeploymentSmoke(options) {
     fail('invalid API request returned an unexpected error shape');
   }
 
-  const cachedApi = await request(
-    fetchResponse,
-    baseUrl,
-    `/api/stocks/search?q=600519&deployment-smoke=${randomUUID()}`,
-    { headers: { pragma: 'no-cache' } },
-  );
+  const stockProbePath = `/api/stocks/search?q=600519&deployment-smoke=${randomUUID()}`;
+  const cachedApi = await request(fetchResponse, baseUrl, stockProbePath, {
+    headers: { pragma: 'no-cache' },
+  });
   requireStatus(cachedApi, 200, 'cache probe did not return HTTP 200');
   requireJsonContentType(cachedApi, 'cache probe did not return JSON');
   const cacheControl = cachedApi.headers.get('cache-control') ?? '';
@@ -61,6 +59,27 @@ export async function runDeploymentSmoke(options) {
   }
   if (!cachedApiBody.data.some((stock) => isObject(stock) && stock.code === '600519.SH')) {
     fail('cache probe did not include 600519.SH');
+  }
+
+  const repeatCachedApi = await request(fetchResponse, baseUrl, stockProbePath);
+  requireStatus(repeatCachedApi, 200, 'repeat cache probe did not return HTTP 200');
+  requireJsonContentType(repeatCachedApi, 'repeat cache probe did not return JSON');
+  const repeatCacheControl = repeatCachedApi.headers.get('cache-control') ?? '';
+  if (!hasSafePositivePublicCachePolicy(repeatCacheControl)) {
+    fail('repeat cache probe did not return a safe positive public cache policy');
+  }
+  if (repeatCachedApi.headers.get('x-vercel-cache')?.trim().toUpperCase() !== 'HIT') {
+    fail('repeat cache probe did not return a shared Vercel HIT');
+  }
+  const repeatCachedApiBody = await parseJson(
+    repeatCachedApi,
+    'repeat cache probe returned invalid JSON',
+  );
+  if (!hasMarketEnvelopeMetadata(repeatCachedApiBody)) {
+    fail('repeat cache probe returned invalid market envelope metadata');
+  }
+  if (!repeatCachedApiBody.data.some((stock) => isObject(stock) && stock.code === '600519.SH')) {
+    fail('repeat cache probe did not include 600519.SH');
   }
 
   const spa = await request(fetchResponse, baseUrl, '/deployment-smoke/spa-fallback');
@@ -150,6 +169,7 @@ function hasSafePositivePublicCachePolicy(value) {
 
   if (
     !directives.has('public') ||
+    directives.get('public') !== undefined ||
     directives.has('private') ||
     directives.has('no-store') ||
     directives.has('no-cache')
@@ -158,11 +178,20 @@ function hasSafePositivePublicCachePolicy(value) {
   }
 
   const maxAge = directives.get('max-age');
+  const sMaxAge = directives.get('s-maxage');
   return (
-    typeof maxAge === 'string' &&
-    /^\d+$/.test(maxAge) &&
-    Number.isSafeInteger(Number(maxAge)) &&
-    Number(maxAge) > 0
+    isPositiveDeltaSeconds(maxAge) &&
+    (!directives.has('s-maxage') || isPositiveDeltaSeconds(sMaxAge))
+  );
+}
+
+/** @param {unknown} value */
+function isPositiveDeltaSeconds(value) {
+  return (
+    typeof value === 'string' &&
+    /^\d+$/.test(value) &&
+    Number.isSafeInteger(Number(value)) &&
+    Number(value) > 0
   );
 }
 
