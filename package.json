@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "preview": "vite preview",
     "test": "vitest run",
     "test:unit": "vitest run --project unit --project component --project contract",
-    "test:browser": "playwright test tests/browser",
+    "test:browser": "playwright test",
+    "test:visual": "playwright test --config=playwright.visual.config.ts",
     "typecheck": "tsc -b --pretty false",
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --fix .",

@@ -24,6 +24,7 @@
     "vite.config.ts",
     "vitest.config.ts",
     "playwright.config.ts",
+    "playwright.visual.config.ts",
     "scripts/**/*.mjs",
     "tests/browser/**/*.ts",
     "tests/unit/**/*.ts",
