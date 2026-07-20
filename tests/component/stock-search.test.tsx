@@ -49,7 +49,10 @@ describe('StockSearch', () => {
     const input = screen.getByRole('combobox', { name: '搜索 A 股' });
     const popupId = input.getAttribute('aria-controls');
     expect(popupId).not.toBeNull();
-    expect(document.getElementById(popupId ?? '')).not.toBeNull();
+    const listbox = document.getElementById(popupId ?? '');
+    expect(listbox).not.toBeNull();
+    expect(listbox?.getAttribute('role')).toBe('listbox');
+    expect(listbox?.getAttribute('aria-busy')).toBe('true');
 
     await advance(1);
     expect(search).toHaveBeenCalledOnce();
@@ -244,23 +247,18 @@ describe('StockSearch', () => {
   );
 
   it.each([
-    ['loading', vi.fn<StockSearchFunction>(() => new Promise(() => undefined))],
     ['empty', vi.fn<StockSearchFunction>(async () => [])],
     ['error', vi.fn<StockSearchFunction>(async () => Promise.reject(new Error('safe')))],
-  ] as const)(
-    'keeps aria-controls attached to a semantic listbox while %s',
-    async (_phase, search) => {
-      vi.useFakeTimers();
-      render(<StockSearch onSelect={vi.fn()} search={search} />);
-      const input = screen.getByRole('combobox', { name: '搜索 A 股' });
-      fireEvent.change(input, { target: { value: '贵州' } });
-      await advance(300);
+  ] as const)('does not expose an empty controlled listbox while %s', async (_phase, search) => {
+    vi.useFakeTimers();
+    render(<StockSearch onSelect={vi.fn()} search={search} />);
+    const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+    fireEvent.change(input, { target: { value: '贵州' } });
+    await advance(300);
 
-      const popup = screen.getByRole('listbox');
-      expect(input.getAttribute('aria-controls')).toBe(popup.id);
-      expect(popup.children).toHaveLength(0);
-    },
-  );
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(input.getAttribute('aria-controls')).toBeNull();
+  });
 
   it('keeps only option semantics inside the controlled listbox', async () => {
     vi.useFakeTimers();

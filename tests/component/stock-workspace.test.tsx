@@ -567,8 +567,23 @@ describe('StockWorkspace', () => {
     expect(screen.getByText('历史数据不足，无法显示主要价格图。')).toBeVisible();
   });
 
+  it('shows loading score semantics before the source requests settle', () => {
+    const fetchClient = vi.fn<WorkspaceFetchClient>(() => new Promise(() => undefined));
+    function Harness() {
+      const state = useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient });
+      return <StockWorkspace state={state} />;
+    }
+    render(<Harness />);
+
+    expect(screen.getAllByText('对应数据加载中')).toHaveLength(3);
+    expect(screen.queryByText('对应数据不可用')).toBeNull();
+    expect(fetchClient).toHaveBeenCalledTimes(4);
+  });
+
   it('preserves independent analysis and charts when the overview endpoint fails', () => {
     const state = readyState();
+    const createChartMock = vi.mocked(createChart);
+    createChartMock.mockClear();
     render(
       <StockWorkspace
         state={{
@@ -586,7 +601,7 @@ describe('StockWorkspace', () => {
     expect(screen.getAllByText('数据截止 2026-07-17')).toHaveLength(2);
     expect(screen.getByText('对应数据不可用')).toBeVisible();
     expect(screen.getByRole('heading', { name: '主要价格图' })).toBeVisible();
-    expect(vi.mocked(createChart)).toHaveBeenCalled();
+    expect(createChartMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -989,8 +1004,61 @@ describe('useStockWorkspace', () => {
     await waitFor(() => expect(result.current[endpoint].status).toBe('error'));
   });
 
+  it.each([
+    '2024-02-29T00:00:00Z',
+    '2026-07-17T08:31:00.123456+08:00',
+    '2026-07-17T08:31:00-00:00',
+    '2026-07-17T08:31:00+23:59',
+  ])('accepts valid RFC3339 market status timestamp %s', async (timestamp) => {
+    const bodies = validWorkspaceBodies();
+    bodies.marketStatus = {
+      ...bodies.marketStatus,
+      data: {
+        ...(bodies.marketStatus.data as Record<string, unknown>),
+        lastSuccessfulAt: timestamp,
+      },
+    };
+    const fetchClient = workspaceFetchClient(bodies);
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+    );
+
+    await waitFor(() => expect(result.current.marketStatus.status).toBe('success'));
+  });
+
+  it.each([
+    '1',
+    '2026-02-30T08:31:00Z',
+    '2026-07-17T24:00:00Z',
+    '2026-13-17T08:31:00Z',
+    '2026-00-17T08:31:00Z',
+    '2026-07-00T08:31:00Z',
+    '2026-07-17T08:60:00Z',
+    '2026-07-17T08:31:60Z',
+    '2026-07-17T08:31:00+24:00',
+    '2026-07-17T08:31:00+08:60',
+    '2026-07-17T08:31:00',
+  ])('rejects invalid RFC3339 market status timestamp %s', async (timestamp) => {
+    const bodies = validWorkspaceBodies();
+    bodies.marketStatus = {
+      ...bodies.marketStatus,
+      data: {
+        ...(bodies.marketStatus.data as Record<string, unknown>),
+        lastSuccessfulAt: timestamp,
+      },
+    };
+    const fetchClient = workspaceFetchClient(bodies);
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+    );
+
+    await waitFor(() => expect(result.current.marketStatus.status).toBe('error'));
+  });
+
   it.each(['lastSuccessfulAt', 'nextExpectedCloseAt'] as const)(
-    'rejects non-RFC3339 market status %s timestamps',
+    'validates both market status %s timestamp fields',
     async (field) => {
       const bodies = validWorkspaceBodies();
       bodies.marketStatus = {

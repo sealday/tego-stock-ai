@@ -36,9 +36,21 @@ export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }
       )}
 
       <div className="score-grid" aria-label="确定性量化评分">
-        <ScoreCard label="趋势评分" score={state.analysis.trend} />
-        <ScoreCard label="财务质量" score={state.analysis.quality} />
-        <ScoreCard label="估值位置" score={state.analysis.valuation} />
+        <ScoreCard
+          label="趋势评分"
+          score={state.analysis.trend}
+          sourceStatus={state.history.status}
+        />
+        <ScoreCard
+          label="财务质量"
+          score={state.analysis.quality}
+          sourceStatus={state.fundamentals.status}
+        />
+        <ScoreCard
+          label="估值位置"
+          score={state.analysis.valuation}
+          sourceStatus={state.overview.status}
+        />
       </div>
 
       {overview === null ? null : (
@@ -130,9 +142,11 @@ function ChangeLabel({
 function ScoreCard({
   label,
   score,
+  sourceStatus,
 }: {
   readonly label: string;
   readonly score: ExplainableScore | null;
+  readonly sourceStatus: StockWorkspaceState['overview']['status'];
 }) {
   return (
     <article className="score-card">
@@ -143,7 +157,13 @@ function ScoreCard({
         </time>
       )}
       {score === null ? (
-        <p className="missing-value">对应数据不可用</p>
+        <p className="missing-value">
+          {sourceStatus === 'loading'
+            ? '对应数据加载中'
+            : sourceStatus === 'error'
+              ? '对应数据不可用'
+              : '参考数据不足'}
+        </p>
       ) : score.score === null ? (
         <p className="missing-value">参考数据不足</p>
       ) : (

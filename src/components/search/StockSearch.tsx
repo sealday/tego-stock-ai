@@ -136,6 +136,7 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
   }
 
   const hasPopup = status === 'loading' || status === 'error' || status === 'success';
+  const hasListbox = status === 'loading' || results.length > 0;
 
   return (
     <div className="stock-search">
@@ -150,8 +151,8 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
         value={query}
         autoComplete="off"
         aria-autocomplete="list"
-        aria-controls={listboxId}
-        aria-expanded={hasPopup}
+        aria-controls={hasListbox ? listboxId : undefined}
+        aria-expanded={hasListbox}
         aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined}
         placeholder="代码 / 名称 / 拼音"
         onChange={(event) => {
@@ -189,32 +190,34 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
               未找到匹配的 A 股
             </p>
           ) : null}
-          <ul
-            className="stock-search__results"
-            id={listboxId}
-            role="listbox"
-            aria-label="股票搜索结果"
-            aria-busy={status === 'loading'}
-          >
-            {results.map((stock, index) => (
-              <li
-                id={`${listboxId}-${index}`}
-                key={stock.code}
-                className="stock-search__result"
-                role="option"
-                aria-selected={activeIndex === index}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  choose(stock);
-                }}
-                onMouseEnter={() => setActiveIndex(index)}
-              >
-                <span className="stock-search__name">{stock.name}</span>
-                <span>{stock.code}</span>
-                <span>{stock.pinyinAbbreviation}</span>
-              </li>
-            ))}
-          </ul>
+          {hasListbox ? (
+            <ul
+              className="stock-search__results"
+              id={listboxId}
+              role="listbox"
+              aria-label="股票搜索结果"
+              aria-busy={status === 'loading'}
+            >
+              {results.map((stock, index) => (
+                <li
+                  id={`${listboxId}-${index}`}
+                  key={stock.code}
+                  className="stock-search__result"
+                  role="option"
+                  aria-selected={activeIndex === index}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    choose(stock);
+                  }}
+                  onMouseEnter={() => setActiveIndex(index)}
+                >
+                  <span className="stock-search__name">{stock.name}</span>
+                  <span>{stock.code}</span>
+                  <span>{stock.pinyinAbbreviation}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
     </div>
