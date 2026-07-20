@@ -5,16 +5,7 @@ import { PriceChart } from '../charts/PriceChart';
 import { DataStatus } from './DataStatus';
 
 export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }) {
-  if (state.overview.status !== 'success') {
-    return (
-      <ResourceFallback
-        label="行情概览"
-        status={state.overview.status}
-        message={state.overview.status === 'error' ? state.overview.message : undefined}
-      />
-    );
-  }
-  const { data, availability } = state.overview.envelope;
+  const overview = state.overview.status === 'success' ? state.overview.envelope : null;
 
   return (
     <section className="workspace-panel" aria-labelledby="overview-heading">
@@ -26,14 +17,23 @@ export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }
         <DataStatus label="行情概览" resource={state.overview} />
       </div>
 
-      <div className="quote-strip">
-        <div>
-          <span className="terminal-label">收盘价</span>
-          <strong className="quote-strip__price">{formatNumber(data.close)}</strong>
-          <span className="quote-strip__unit">CNY</span>
+      {state.overview.status !== 'success' ? (
+        <OverviewMarketFallback resource={state.overview} />
+      ) : (
+        <div className="quote-strip">
+          <div>
+            <span className="terminal-label">收盘价</span>
+            <strong className="quote-strip__price">
+              {formatNumber(state.overview.envelope.data.close)}
+            </strong>
+            <span className="quote-strip__unit">CNY</span>
+          </div>
+          <ChangeLabel
+            change={state.overview.envelope.data.changePercent}
+            availability={state.overview.envelope.availability}
+          />
         </div>
-        <ChangeLabel change={data.changePercent} availability={availability} />
-      </div>
+      )}
 
       <div className="score-grid" aria-label="确定性量化评分">
         <ScoreCard label="趋势评分" score={state.analysis.trend} />
@@ -41,32 +41,38 @@ export function OverviewPanel({ state }: { readonly state: StockWorkspaceState }
         <ScoreCard label="估值位置" score={state.analysis.valuation} />
       </div>
 
-      <dl className="metric-grid">
-        <Metric
-          label="市盈率 TTM"
-          value={data.peTtm}
-          unit="倍"
-          reason={missingReason(availability, 'peTtm')}
-        />
-        <Metric
-          label="市净率"
-          value={data.pb}
-          unit="倍"
-          reason={missingReason(availability, 'pb')}
-        />
-        <Metric
-          label="总市值"
-          value={data.totalMarketValueCny === null ? null : data.totalMarketValueCny / 100_000_000}
-          unit="亿元"
-          reason={missingReason(availability, 'totalMarketValueCny')}
-        />
-        <Metric
-          label="前收盘"
-          value={data.previousClose}
-          unit="元"
-          reason={missingReason(availability, 'previousClose')}
-        />
-      </dl>
+      {overview === null ? null : (
+        <dl className="metric-grid">
+          <Metric
+            label="市盈率 TTM"
+            value={overview.data.peTtm}
+            unit="倍"
+            reason={missingReason(overview.availability, 'peTtm')}
+          />
+          <Metric
+            label="市净率"
+            value={overview.data.pb}
+            unit="倍"
+            reason={missingReason(overview.availability, 'pb')}
+          />
+          <Metric
+            label="总市值"
+            value={
+              overview.data.totalMarketValueCny === null
+                ? null
+                : overview.data.totalMarketValueCny / 100_000_000
+            }
+            unit="亿元"
+            reason={missingReason(overview.availability, 'totalMarketValueCny')}
+          />
+          <Metric
+            label="前收盘"
+            value={overview.data.previousClose}
+            unit="元"
+            reason={missingReason(overview.availability, 'previousClose')}
+          />
+        </dl>
+      )}
 
       <OverviewPriceChart state={state} />
     </section>
@@ -204,20 +210,19 @@ function Metric({
   );
 }
 
-function ResourceFallback({
-  label,
-  status,
-  message,
+function OverviewMarketFallback({
+  resource,
 }: {
-  readonly label: string;
-  readonly status: 'loading' | 'error';
-  readonly message?: string | undefined;
+  readonly resource: Extract<StockWorkspaceState['overview'], { status: 'loading' | 'error' }>;
 }) {
-  return (
-    <section className="workspace-panel">
-      <h2>{label}</h2>
-      {status === 'loading' ? <p role="status">加载中…</p> : <p role="alert">{message}</p>}
-    </section>
+  return resource.status === 'loading' ? (
+    <p className="quote-strip" role="status">
+      行情概览加载中…
+    </p>
+  ) : (
+    <p className="quote-strip" role="alert">
+      {resource.message}
+    </p>
   );
 }
 

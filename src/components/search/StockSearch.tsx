@@ -169,13 +169,7 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
         onKeyDown={handleKeyDown}
       />
       {hasPopup ? (
-        <div
-          className="stock-search__popover"
-          id={listboxId}
-          role="listbox"
-          aria-label="股票搜索结果"
-          aria-busy={status === 'loading'}
-        >
+        <div className="stock-search__popover">
           {status === 'loading' ? (
             <p className="stock-search__message" role="status" aria-live="polite">
               正在搜索…
@@ -195,28 +189,32 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
               未找到匹配的 A 股
             </p>
           ) : null}
-          {status === 'success' && results.length > 0 ? (
-            <ul className="stock-search__results" role="presentation">
-              {results.map((stock, index) => (
-                <li
-                  id={`${listboxId}-${index}`}
-                  key={stock.code}
-                  className="stock-search__result"
-                  role="option"
-                  aria-selected={activeIndex === index}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    choose(stock);
-                  }}
-                  onMouseEnter={() => setActiveIndex(index)}
-                >
-                  <span className="stock-search__name">{stock.name}</span>
-                  <span>{stock.code}</span>
-                  <span>{stock.pinyinAbbreviation}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          <ul
+            className="stock-search__results"
+            id={listboxId}
+            role="listbox"
+            aria-label="股票搜索结果"
+            aria-busy={status === 'loading'}
+          >
+            {results.map((stock, index) => (
+              <li
+                id={`${listboxId}-${index}`}
+                key={stock.code}
+                className="stock-search__result"
+                role="option"
+                aria-selected={activeIndex === index}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  choose(stock);
+                }}
+                onMouseEnter={() => setActiveIndex(index)}
+              >
+                <span className="stock-search__name">{stock.name}</span>
+                <span>{stock.code}</span>
+                <span>{stock.pinyinAbbreviation}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
     </div>

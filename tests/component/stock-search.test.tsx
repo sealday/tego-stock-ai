@@ -258,8 +258,24 @@ describe('StockSearch', () => {
 
       const popup = screen.getByRole('listbox');
       expect(input.getAttribute('aria-controls')).toBe(popup.id);
+      expect(popup.children).toHaveLength(0);
     },
   );
+
+  it('keeps only option semantics inside the controlled listbox', async () => {
+    vi.useFakeTimers();
+    render(<StockSearch onSelect={vi.fn()} search={vi.fn(async () => [MOUTAI, PING_AN])} />);
+    const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+    fireEvent.change(input, { target: { value: '银行' } });
+    await advance(300);
+
+    const listbox = screen.getByRole('listbox');
+    expect(input.getAttribute('aria-controls')).toBe(listbox.id);
+    expect(Array.from(listbox.children).map((child) => child.getAttribute('role'))).toEqual([
+      'option',
+      'option',
+    ]);
+  });
 
   it('rejects a malformed default API envelope with a safe message', async () => {
     vi.useFakeTimers();

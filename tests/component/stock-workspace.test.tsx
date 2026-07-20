@@ -566,6 +566,28 @@ describe('StockWorkspace', () => {
     );
     expect(screen.getByText('历史数据不足，无法显示主要价格图。')).toBeVisible();
   });
+
+  it('preserves independent analysis and charts when the overview endpoint fails', () => {
+    const state = readyState();
+    render(
+      <StockWorkspace
+        state={{
+          ...state,
+          overview: { status: 'error', message: '行情概览暂时不可用' },
+          analysis: { ...state.analysis, valuation: null },
+        }}
+      />,
+    );
+
+    expect(screen.getByRole('alert').textContent).toContain('行情概览暂时不可用');
+    expect(screen.getByText('趋势评分')).toBeVisible();
+    expect(screen.getByText('财务质量')).toBeVisible();
+    expect(screen.getByText('估值位置')).toBeVisible();
+    expect(screen.getAllByText('数据截止 2026-07-17')).toHaveLength(2);
+    expect(screen.getByText('对应数据不可用')).toBeVisible();
+    expect(screen.getByRole('heading', { name: '主要价格图' })).toBeVisible();
+    expect(vi.mocked(createChart)).toHaveBeenCalled();
+  });
 });
 
 describe('workspace status derivation', () => {
@@ -846,6 +868,30 @@ describe('useStockWorkspace', () => {
   );
 
   it.each([
+    ['blank name', { name: '   ' }],
+    ['non-positive close', { close: 0 }],
+    ['non-positive previous close', { previousClose: 0 }],
+    ['negative market value', { totalMarketValueCny: -1 }],
+  ] as const)('rejects overview with %s', async (_label, mutation) => {
+    const bodies = validWorkspaceBodies();
+    bodies.overview = {
+      ...bodies.overview,
+      data: { ...(bodies.overview.data as Record<string, unknown>), ...mutation },
+    };
+    const fetchClient = workspaceFetchClient(bodies);
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+    );
+
+    await waitFor(() => expect(result.current.overview.status).toBe('error'));
+    expect(result.current.overview).toEqual({
+      status: 'error',
+      message: '该数据项暂时不可用，请稍后重试。',
+    });
+  });
+
+  it.each([
     [
       'overview',
       (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
@@ -865,6 +911,16 @@ describe('useStockWorkspace', () => {
       'history',
       (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
         bodies.history = { ...bodies.history, asOf: isoDate('2026-07-16') };
+      },
+    ],
+    [
+      'history',
+      (bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>) => {
+        bodies.history = {
+          ...bodies.history,
+          asOf: isoDate('2025-07-16'),
+          data: [],
+        };
       },
     ],
     [
@@ -932,6 +988,24 @@ describe('useStockWorkspace', () => {
 
     await waitFor(() => expect(result.current[endpoint].status).toBe('error'));
   });
+
+  it.each(['lastSuccessfulAt', 'nextExpectedCloseAt'] as const)(
+    'rejects non-RFC3339 market status %s timestamps',
+    async (field) => {
+      const bodies = validWorkspaceBodies();
+      bodies.marketStatus = {
+        ...bodies.marketStatus,
+        data: { ...(bodies.marketStatus.data as Record<string, unknown>), [field]: '1' },
+      };
+      const fetchClient = workspaceFetchClient(bodies);
+
+      const { result } = renderHook(() =>
+        useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+      );
+
+      await waitFor(() => expect(result.current.marketStatus.status).toBe('error'));
+    },
+  );
 
   it('binds visible resources to the current request key during a synchronous stock switch', async () => {
     const bodies = validWorkspaceBodies();
@@ -1086,7 +1160,7 @@ describe('useStockWorkspace', () => {
     await act(async () => resolvers.get('history')?.(Response.json(bodies.history)));
     const technicalAfterHistory = technicalReferences.at(-1);
     expect(technicalAfterHistory).not.toBeNull();
-    expect(createChartMock).not.toHaveBeenCalled();
+    expect(createChartMock).toHaveBeenCalledTimes(1);
 
     await act(async () => resolvers.get('overview')?.(Response.json(bodies.overview)));
     expect(technicalReferences.at(-1)).toBe(technicalAfterHistory);

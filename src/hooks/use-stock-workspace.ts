@@ -487,9 +487,10 @@ function parseOverviewEnvelope(
 ): MarketEnvelope<StockOverview> {
   const envelope = parseEnvelope<StockOverview>(value, (data) => {
     const record = readRecord(data, 'overview');
+    const name = readString(record, 'name');
     const overview = {
       code: stockCode(readString(record, 'code')),
-      name: readString(record, 'name'),
+      name,
       date: isoDate(readString(record, 'date')),
       close: readNumber(record, 'close'),
       previousClose: readNullableNumber(record, 'previousClose'),
@@ -499,6 +500,14 @@ function parseOverviewEnvelope(
       totalMarketValueCny: readNullableNumber(record, 'totalMarketValueCny'),
     };
     assertExpectedCode(overview.code, expectedCode);
+    if (
+      overview.name.trim().length === 0 ||
+      overview.close <= 0 ||
+      (overview.previousClose !== null && overview.previousClose <= 0) ||
+      (overview.totalMarketValueCny !== null && overview.totalMarketValueCny < 0)
+    ) {
+      throw new TypeError('Invalid overview values');
+    }
     return overview;
   });
   if (envelope.asOf > requestedAsOf || envelope.data.date !== envelope.asOf) {
@@ -553,7 +562,7 @@ function parseHistoryEnvelope(
       return row;
     });
   });
-  if (envelope.asOf > end) {
+  if (envelope.asOf < start || envelope.asOf > end) {
     throw new TypeError('Invalid history cutoff identity');
   }
   const dates = envelope.data.map(({ date }) => date);
@@ -685,7 +694,10 @@ function readNullableNumber(record: Record<string, unknown>, key: string): numbe
 
 function readTimestamp(record: Record<string, unknown>, key: string): string {
   const value = readString(record, key);
-  if (Number.isNaN(Date.parse(value))) {
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) ||
+    Number.isNaN(Date.parse(value))
+  ) {
     throw new TypeError(`Invalid ${key}`);
   }
   return value;
