@@ -163,6 +163,17 @@ function completeReport(firstSection = '数据截止 2026-07-17。'): string {
   ).join('\n\n');
 }
 
+function reportWithEmptySection(
+  emptySectionIndex: number,
+  sectionCount: number = REPORT_SECTION_HEADINGS.length,
+): string {
+  return REPORT_SECTION_HEADINGS.slice(0, sectionCount)
+    .map((heading, index) =>
+      index === emptySectionIndex ? `## ${heading}` : `## ${heading}\n第 ${index + 1} 节内容。`,
+    )
+    .join('\n');
+}
+
 function eventStream(events: readonly AiStreamEvent[]): AiReportStreamer {
   return async function* () {
     for (const event of events) {
@@ -300,6 +311,109 @@ describe('AiReportPanel', () => {
     expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
       reason: 'contract-invalid',
       contractFailure: 'unknown-heading',
+    });
+  });
+
+  it('keeps a trailing empty section as a cancelled draft when the user cancels', async () => {
+    const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    const stream: AiReportStreamer = async function* (configuration) {
+      yield {
+        type: 'delta',
+        text: reportWithEmptySection(REPORT_SECTION_HEADINGS.length - 1),
+      };
+      await new Promise<void>((resolve) => {
+        configuration.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      yield { type: 'aborted' };
+    };
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    expect(await screen.findByText('第 1 节内容。')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '取消生成' }));
+
+    expect(screen.getByText('未完成草稿 · 生成已取消')).toBeVisible();
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({ reason: 'cancelled' });
+    expect(onDraftReport.mock.calls[0]?.[0].contractFailure).toBeUndefined();
+  });
+
+  it('keeps a trailing empty section as an interrupted draft on provider error', async () => {
+    const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={interruptedStream(
+          reportWithEmptySection(REPORT_SECTION_HEADINGS.length - 1),
+          'error',
+        )}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+    expect(await screen.findByText('未完成草稿 · 流式响应中断')).toBeVisible();
+    expect(onDraftReport).toHaveBeenCalledOnce();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({ reason: 'stream-interrupted' });
+    expect(onDraftReport.mock.calls[0]?.[0].contractFailure).toBeUndefined();
+  });
+
+  it('rejects a proven empty middle section when a provider error interrupts the stream', async () => {
+    const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={interruptedStream(reportWithEmptySection(1, 4), 'error')}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+    expect(await screen.findByText('未完成草稿 · 响应未通过七章节契约校验')).toBeVisible();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+      reason: 'contract-invalid',
+      contractFailure: 'empty-section',
+    });
+  });
+
+  it('rejects a trailing empty section when the provider marks the response complete', async () => {
+    const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={eventStream([
+          {
+            type: 'delta',
+            text: reportWithEmptySection(REPORT_SECTION_HEADINGS.length - 1),
+          },
+          { type: 'complete' },
+        ])}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+    expect(await screen.findByText('未完成草稿 · 响应未通过七章节契约校验')).toBeVisible();
+    expect(onDraftReport.mock.calls[0]?.[0]).toMatchObject({
+      reason: 'contract-invalid',
+      contractFailure: 'empty-section',
     });
   });
 

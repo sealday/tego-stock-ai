@@ -481,7 +481,13 @@ async function runGeneration(callbacks: GenerationCallbacks): Promise<void> {
 function isInterruptedContractViolation(
   result: FinalReportParseResult,
 ): result is Extract<FinalReportParseResult, { readonly status: 'invalid' }> {
-  return result.status === 'invalid' && result.reason !== 'incomplete-report';
+  if (result.status !== 'invalid' || result.reason === 'incomplete-report') {
+    return false;
+  }
+  if (result.reason !== 'empty-section') {
+    return true;
+  }
+  return result.sections.slice(0, -1).some((section) => section.content.length === 0);
 }
 
 function finalizeAggregate(rawText: string): FinalReportParseResult {

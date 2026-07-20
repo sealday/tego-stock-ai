@@ -175,8 +175,13 @@ export function createIncrementalReportParser(): IncrementalReportParser {
       processLine(finalLine);
     }
     const sections = snapshot();
+    const hasEmptyCompletedSection =
+      currentHeadingIndex > 0 &&
+      sections.slice(0, currentHeadingIndex).some((section) => section.content.length === 0);
     if (failure !== null) {
       finalResult = { status: 'invalid', reason: failure, sections };
+    } else if (hasEmptyCompletedSection) {
+      finalResult = { status: 'invalid', reason: 'empty-section', sections };
     } else if (seenHeadings.size !== REPORT_SECTION_HEADINGS.length) {
       finalResult = { status: 'invalid', reason: 'incomplete-report', sections };
     } else if (sections.some((section) => section.content.length === 0)) {
