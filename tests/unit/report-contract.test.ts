@@ -408,6 +408,52 @@ describe('report context contract', () => {
     expect(() => validateReportContext(withoutFreshness)).toThrow(/freshness|required/i);
   });
 
+  it.each([
+    ['overview', { cutoffs: { overview: null }, freshness: { overview: 'fresh' } }],
+    ['history', { cutoffs: { history: '2026-07-16' }, freshness: { history: null } }],
+    ['fundamentals', { cutoffs: { fundamentals: null }, freshness: { fundamentals: 'stale' } }],
+  ] as const)(
+    'requires %s cutoff and freshness to be present or absent together',
+    (_resource, patch) => {
+      const context = validContext();
+      expect(() =>
+        validateReportContext({
+          ...context,
+          cutoffs: { ...context.cutoffs, ...patch.cutoffs },
+          freshness: { ...context.freshness, ...patch.freshness },
+        }),
+      ).toThrow(/cutoff|freshness|resource/i);
+    },
+  );
+
+  it.each([
+    ['score below zero', { score: -0.01 }],
+    ['score above one hundred', { score: 100.01 }],
+    ['band inconsistent with score', { score: 78.2, band: 'strong' }],
+    ['null score with a band', { score: null, band: 'mixed', status: 'insufficient' }],
+    ['null score with a non-insufficient status', { score: null, band: null, status: 'partial' }],
+    [
+      'non-null score with insufficient status',
+      { score: 78.2, band: 'constructive', status: 'insufficient' },
+    ],
+    ['complete score with missing inputs', { status: 'complete', missingInputs: ['ma60'] }],
+    [
+      'insufficient score without missing inputs',
+      { score: null, band: null, status: 'insufficient', missingInputs: [] },
+    ],
+  ] as const)('rejects a signal with %s', (_name, signalPatch) => {
+    const context = validContext();
+    expect(() =>
+      validateReportContext({
+        ...context,
+        signals: {
+          ...context.signals,
+          trend: { ...context.signals.trend, ...signalPatch },
+        },
+      }),
+    ).toThrow(/score|band|status|missing/i);
+  });
+
   it('requires exactly one availability entry for every allowlisted metric', () => {
     const context = validContext();
     expect(() =>

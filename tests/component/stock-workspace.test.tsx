@@ -285,7 +285,19 @@ function workspaceFetchClient(
 }
 
 describe('StockWorkspace', () => {
-  it('exposes all tabs, deterministic evidence, and the browser-only AI report controls', () => {
+  it('loads the optional AI workspace only after first activation', async () => {
+    const { container } = render(<StockWorkspace state={readyState()} />);
+
+    expect(container.querySelector('.ai-report-workspace')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+    expect(await screen.findByRole('heading', { name: 'AI 提供商设置' })).toBeVisible();
+    expect(container.querySelector('.ai-report-workspace')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('tab', { name: '概览' }));
+    expect(container.querySelector('.ai-report-workspace')).not.toBeNull();
+  });
+
+  it('exposes all tabs, deterministic evidence, and the browser-only AI report controls', async () => {
     render(<StockWorkspace state={readyState()} />);
 
     expect(screen.getByRole('heading', { name: '贵州茅台量化研究' })).toBeVisible();
@@ -308,7 +320,7 @@ describe('StockWorkspace', () => {
     }
 
     fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
-    expect(screen.getByRole('heading', { name: 'AI 提供商设置' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'AI 提供商设置' })).toBeVisible();
     expect(screen.getByRole('button', { name: '生成 AI 报告' })).toBeVisible();
     expect(screen.getByText(/确定性分析摘要/)).toBeVisible();
   });

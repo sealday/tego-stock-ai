@@ -43,6 +43,15 @@ const SAFE_PROVIDER_ERROR = 'AI 服务返回错误，请检查提供商设置。
 const SAFE_NETWORK_ERROR = '无法连接 AI 提供商，请稍后重试。';
 const SAFE_MALFORMED_ERROR = 'AI 服务返回了无法解析的流数据。';
 const SAFE_INTERRUPTED_ERROR = 'AI 响应流意外中断。';
+const SAFE_INVALID_CONTENT_TYPE_ERROR = 'AI 服务返回了无效的流式响应。';
+const SAFE_SIZE_LIMIT_ERROR = 'AI 响应超过安全大小限制。';
+
+// Bound hostile or accidentally unbounded provider streams while leaving ample room for a report.
+export const MAX_AI_SSE_BYTES = 2 * 1024 * 1024;
+// Bound memory held before an SSE frame delimiter arrives.
+export const MAX_AI_SSE_FRAME_BYTES = 256 * 1024;
+// Bound report text retained by the UI and eligible for local draft persistence.
+export const MAX_AI_REPORT_TEXT_BYTES = 512 * 1024;
 
 export function buildChatCompletionsUrl(
   baseUrl: string,
@@ -63,7 +72,7 @@ export function buildChatCompletionsUrl(
   }
   if (applicationOrigin !== undefined) {
     const applicationUrl = new URL(applicationOrigin);
-    if (url.origin === applicationUrl.origin) {
+    if (canonicalOrigin(url) === canonicalOrigin(applicationUrl)) {
       throw new TypeError('AI base URL must not use the application origin');
     }
   }
@@ -79,11 +88,10 @@ export function buildChatCompletionsUrl(
 export function createAiClient(
   configuration: AiClientConfiguration,
   fetchClient: AiFetchClient = fetch,
-  applicationOrigin = runtimeApplicationOrigin(),
 ): AiClient {
   return {
     stream: (messages) =>
-      streamChatCompletion(configuration, messages, fetchClient, applicationOrigin),
+      streamChatCompletion(configuration, messages, fetchClient, runtimeApplicationOrigin()),
   };
 }
 
@@ -124,6 +132,7 @@ async function* streamChatCompletion(
       },
       body: JSON.stringify({ model: configuration.model, messages, stream: true }),
       signal: configuration.signal,
+      redirect: 'error',
     });
   } catch {
     yield configuration.signal.aborted
@@ -139,6 +148,16 @@ async function* streamChatCompletion(
     return;
   }
 
+  if (!isEventStreamContentType(response.headers.get('content-type'))) {
+    await cancelBodySafely(response.body);
+    yield {
+      type: 'error',
+      code: 'invalid-response',
+      message: SAFE_INVALID_CONTENT_TYPE_ERROR,
+    };
+    return;
+  }
+
   if (response.body === null) {
     yield { type: 'error', code: 'invalid-response', message: SAFE_INTERRUPTED_ERROR };
     return;
@@ -148,8 +167,10 @@ async function* streamChatCompletion(
   const decoder = new TextDecoder();
   let buffer = '';
   let reachedDone = false;
+  let rawBytes = 0;
+  let reportBytes = 0;
   const cancelReader = () => {
-    void reader.cancel();
+    void cancelReaderSafely(reader);
   };
   configuration.signal.addEventListener('abort', cancelReader, { once: true });
 
@@ -174,11 +195,26 @@ async function* streamChatCompletion(
         buffer += decoder.decode();
         break;
       }
+      rawBytes += result.value.byteLength;
+      if (rawBytes > MAX_AI_SSE_BYTES) {
+        yield sizeLimitError();
+        return;
+      }
       buffer += decoder.decode(result.value, { stream: true });
 
       const extracted = extractFrames(buffer);
       buffer = extracted.remaining;
+      if (utf8ByteLength(buffer) > MAX_AI_SSE_FRAME_BYTES) {
+        yield sizeLimitError();
+        return;
+      }
+      let batchText = '';
+      let terminalEvent: AiStreamEvent | undefined;
       for (const frame of extracted.frames) {
+        if (utf8ByteLength(frame) > MAX_AI_SSE_FRAME_BYTES) {
+          terminalEvent = sizeLimitError();
+          break;
+        }
         const parsed = parseFrame(frame);
         if (parsed.type === 'ignore') {
           continue;
@@ -187,18 +223,47 @@ async function* streamChatCompletion(
           reachedDone = true;
           break;
         }
-        yield parsed.event;
-        if (parsed.event.type === 'error') {
-          return;
+        if (parsed.event.type === 'delta') {
+          const nextBytes = utf8ByteLength(parsed.event.text);
+          if (reportBytes + nextBytes > MAX_AI_REPORT_TEXT_BYTES) {
+            terminalEvent = sizeLimitError();
+            break;
+          }
+          reportBytes += nextBytes;
+          batchText += parsed.event.text;
+          continue;
         }
+        if (parsed.event.type === 'error') {
+          terminalEvent = parsed.event;
+          break;
+        }
+      }
+      if (batchText.length > 0) {
+        yield { type: 'delta', text: batchText };
+      }
+      if (terminalEvent !== undefined) {
+        yield terminalEvent;
+        return;
       }
     }
 
     if (!reachedDone && buffer.trim().length > 0) {
+      if (utf8ByteLength(buffer) > MAX_AI_SSE_FRAME_BYTES) {
+        yield sizeLimitError();
+        return;
+      }
       const parsed = parseFrame(buffer);
       if (parsed.type === 'done') {
         reachedDone = true;
       } else if (parsed.type === 'event') {
+        if (parsed.event.type === 'delta') {
+          const nextBytes = utf8ByteLength(parsed.event.text);
+          if (reportBytes + nextBytes > MAX_AI_REPORT_TEXT_BYTES) {
+            yield sizeLimitError();
+            return;
+          }
+          reportBytes += nextBytes;
+        }
         yield parsed.event;
         if (parsed.event.type === 'error') {
           return;
@@ -215,6 +280,7 @@ async function* streamChatCompletion(
     }
   } finally {
     configuration.signal.removeEventListener('abort', cancelReader);
+    await cancelReaderSafely(reader);
     reader.releaseLock();
   }
 }
@@ -286,12 +352,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isLoopbackHost(hostname: string): boolean {
+  const normalizedHostname = normalizeHostname(hostname);
   return (
-    hostname === 'localhost' ||
-    hostname.endsWith('.localhost') ||
-    hostname === '[::1]' ||
-    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+    normalizedHostname === 'localhost' ||
+    normalizedHostname.endsWith('.localhost') ||
+    normalizedHostname === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalizedHostname)
   );
+}
+
+function isEventStreamContentType(contentType: string | null): boolean {
+  return contentType !== null && /^text\/event-stream(?:\s*;|\s*$)/i.test(contentType.trim());
+}
+
+function canonicalOrigin(url: URL): string {
+  return `${url.protocol}//${normalizeHostname(url.hostname)}:${effectivePort(url)}`;
+}
+
+function normalizeHostname(hostname: string): string {
+  const normalized = hostname.toLowerCase();
+  return normalized.startsWith('[') ? normalized : normalized.replace(/\.+$/, '');
+}
+
+function effectivePort(url: URL): string {
+  if (url.port.length > 0) {
+    return url.port;
+  }
+  if (url.protocol === 'https:') {
+    return '443';
+  }
+  if (url.protocol === 'http:') {
+    return '80';
+  }
+  return '';
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function sizeLimitError(): AiStreamEvent {
+  return { type: 'error', code: 'invalid-response', message: SAFE_SIZE_LIMIT_ERROR };
+}
+
+async function cancelBodySafely(body: ReadableStream<Uint8Array> | null): Promise<void> {
+  if (body === null) {
+    return;
+  }
+  try {
+    await body.cancel();
+  } catch {
+    // Cancellation is cleanup only; provider details must never escape through this path.
+  }
+}
+
+async function cancelReaderSafely(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Cancellation is cleanup only; provider details must never escape through this path.
+  }
 }
 
 function runtimeApplicationOrigin(): string | undefined {

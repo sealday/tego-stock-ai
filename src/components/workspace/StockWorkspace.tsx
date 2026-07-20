@@ -1,35 +1,33 @@
-import { useRef, useState, type KeyboardEvent } from 'react';
+import { lazy, Suspense, useRef, useState, type KeyboardEvent } from 'react';
 
-import { createWorkspaceReportContext } from '../../ai/report-contract';
 import { WORKSPACE_TABS, type WorkspaceTabId } from '../../app/routes';
 import { formatShanghaiTimestamp, type StockWorkspaceState } from '../../hooks/use-stock-workspace';
-import {
-  AiReportPanel,
-  type CompleteAiReport,
-  type DraftAiReport,
-  type GeneratedAiReport,
-} from '../ai/AiReportPanel';
-import {
-  AiSettings,
-  DEFAULT_AI_PROVIDER_SETTINGS,
-  type AiProviderSettings,
-} from '../ai/AiSettings';
 import { DataStatus } from './DataStatus';
 import { FinancialTrendsPanel } from './FinancialTrendsPanel';
 import { FundamentalsPanel } from './FundamentalsPanel';
 import { OverviewPanel } from './OverviewPanel';
 import { TechnicalPanel } from './TechnicalPanel';
 
+const AiReportWorkspace = lazy(async () => {
+  const module = await import('./AiReportWorkspace');
+  return { default: module.default };
+});
+
 export function StockWorkspace({ state }: { readonly state: StockWorkspaceState }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('overview');
-  const [aiSettings, setAiSettings] = useState<AiProviderSettings>(DEFAULT_AI_PROVIDER_SETTINGS);
-  const [reports, setReports] = useState<readonly GeneratedAiReport[]>([]);
+  const [aiWorkspaceActivated, setAiWorkspaceActivated] = useState(false);
   const tabReferences = useRef<Array<HTMLButtonElement | null>>([]);
   const name = state.overview.status === 'success' ? state.overview.envelope.data.name : state.code;
   const marketSnapshotStale =
     state.marketStatus.status === 'success' &&
     (state.marketStatus.envelope.freshness === 'stale' ||
       state.marketStatus.envelope.data.freshness === 'stale');
+  const activateTab = (tab: WorkspaceTabId) => {
+    setActiveTab(tab);
+    if (tab === 'ai-report') {
+      setAiWorkspaceActivated(true);
+    }
+  };
 
   return (
     <article
@@ -100,9 +98,9 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
             ref={(element) => {
               tabReferences.current[index] = element;
             }}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => activateTab(tab.id)}
             onKeyDown={(event) =>
-              handleTabKeyDown(event, index, setActiveTab, tabReferences.current)
+              handleTabKeyDown(event, index, activateTab, tabReferences.current)
             }
           >
             {tab.label}
@@ -119,17 +117,11 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
           hidden={activeTab !== tab.id}
         >
           {tab.id === 'ai-report' ? (
-            <AiReportWorkspace
-              state={state}
-              active={activeTab === tab.id}
-              settings={aiSettings}
-              reportCount={reports.length}
-              onSettingsChange={setAiSettings}
-              onSaveReport={(report) => setReports((currentReports) => [report, ...currentReports])}
-              onDraftReport={(report) =>
-                setReports((currentReports) => [report, ...currentReports])
-              }
-            />
+            aiWorkspaceActivated ? (
+              <Suspense fallback={<p>正在加载 AI 工作区…</p>}>
+                <AiReportWorkspace state={state} active={activeTab === tab.id} />
+              </Suspense>
+            ) : null
           ) : activeTab === tab.id ? (
             renderActivePanel(tab.id, state)
           ) : null}
@@ -219,57 +211,5 @@ function WorkspaceLimitations({ state }: { readonly state: StockWorkspaceState }
         </ul>
       )}
     </aside>
-  );
-}
-
-function AiReportWorkspace({
-  state,
-  active,
-  settings,
-  reportCount,
-  onSettingsChange,
-  onSaveReport,
-  onDraftReport,
-}: {
-  readonly state: StockWorkspaceState;
-  readonly active: boolean;
-  readonly settings: AiProviderSettings;
-  readonly reportCount: number;
-  readonly onSettingsChange: (settings: AiProviderSettings) => void;
-  readonly onSaveReport: (report: CompleteAiReport) => void;
-  readonly onDraftReport: (report: DraftAiReport) => void;
-}) {
-  const context = createWorkspaceReportContext(state);
-  const retainedContext = useRef(context);
-  if (context !== null) {
-    retainedContext.current = context;
-  }
-  const reportContext = context ?? retainedContext.current;
-
-  return (
-    <div className="ai-report-workspace">
-      {active ? <AiSettings value={settings} onChange={onSettingsChange} /> : null}
-      {context === null && active ? (
-        <section className="workspace-panel" aria-labelledby="ai-report-heading">
-          <p className="panel-kicker">等待确定性上下文</p>
-          <h2 id="ai-report-heading">AI 报告</h2>
-          <p>数据截止日期尚不可用。确定性面板仍可使用，报告生成将在上下文完整后启用。</p>
-        </section>
-      ) : null}
-      {reportContext === null ? null : (
-        <AiReportPanel
-          active={active && context !== null}
-          context={reportContext}
-          settings={settings}
-          onSaveReport={onSaveReport}
-          onDraftReport={onDraftReport}
-        />
-      )}
-      {active && reportCount > 0 ? (
-        <p className="ai-report-workspace__saved-count">
-          当前页面会话已保留 {reportCount} 份完整报告或未完成草稿。
-        </p>
-      ) : null}
-    </div>
   );
 }

@@ -198,6 +198,48 @@ function interruptedStream(pendingText: string, terminal: InterruptedTerminal): 
 }
 
 describe('AiReportPanel', () => {
+  it('exposes one bounded polite status and marks only the report panel busy while streaming', async () => {
+    const user = userEvent.setup();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stream: AiReportStreamer = async function* () {
+      yield { type: 'delta', text: '## 数据摘要与截止日期\n正在生成的内容。' };
+      await gate;
+      yield { type: 'delta', text: completeReport().slice(completeReport().indexOf('\n\n')) };
+      yield { type: 'complete' };
+    };
+    const onSaveReport = vi.fn<(report: CompleteAiReport) => void>();
+    const { container } = render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        onSaveReport={onSaveReport}
+      />,
+    );
+
+    const panel = container.querySelector('.ai-report');
+    expect(panel?.getAttribute('aria-busy')).toBe('false');
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status').getAttribute('aria-live')).toBe('polite');
+    expect(screen.getByRole('status').getAttribute('aria-atomic')).toBe('true');
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    await screen.findByText('正在生成的内容。');
+    expect(panel?.getAttribute('aria-busy')).toBe('true');
+    expect(screen.getByRole('status').textContent).toContain('正在流式生成');
+    expect(container.querySelectorAll('[aria-live]')).toHaveLength(1);
+
+    release();
+    await screen.findByText('报告已完成');
+    expect(panel?.getAttribute('aria-busy')).toBe('false');
+    await user.click(screen.getByRole('button', { name: '保存完整报告' }));
+    expect(screen.getByRole('status').textContent).toContain('完整报告已交给本地保存回调');
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+  });
+
   it('waits for an explicit action, renders seven safe structured sections, and saves only complete reports', async () => {
     const user = userEvent.setup();
     const rawReport = completeReport('<img src=x onerror=alert(1)> 作为纯文本。');

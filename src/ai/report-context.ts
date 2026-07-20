@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { CALCULATION_VERSION, type ExplainableScore } from '../analysis/scores';
+import { CALCULATION_VERSION, qualitativeBand, type ExplainableScore } from '../analysis/scores';
 import type { StockWorkspaceState } from '../hooks/use-stock-workspace';
 
 export const MAX_REPORT_CONTEXT_BYTES = 200 * 1024;
@@ -9,15 +9,56 @@ const nullableMetric = z.number().finite().nullable();
 const nonemptyString = z.string().trim().min(1);
 const freshnessSchema = z.enum(['fresh', 'stale']);
 
-const scoreSignalSchema = z.strictObject({
-  score: nullableMetric,
-  band: z.enum(['weak', 'mixed', 'constructive', 'strong']).nullable(),
-  status: z.enum(['complete', 'partial', 'insufficient']),
-  cutoff: z.string().date().nullable(),
-  calculationVersion: nonemptyString,
-  observations: z.array(nonemptyString),
-  missingInputs: z.array(nonemptyString),
-});
+const scoreSignalSchema = z
+  .strictObject({
+    score: z.number().finite().min(0).max(100).nullable(),
+    band: z.enum(['weak', 'mixed', 'constructive', 'strong']).nullable(),
+    status: z.enum(['complete', 'partial', 'insufficient']),
+    cutoff: z.string().date().nullable(),
+    calculationVersion: nonemptyString,
+    observations: z.array(nonemptyString),
+    missingInputs: z.array(nonemptyString),
+  })
+  .superRefine((signal, context) => {
+    if (signal.score === null) {
+      if (signal.band !== null || signal.status !== 'insufficient') {
+        context.addIssue({
+          code: 'custom',
+          message: 'A null score requires a null band and insufficient status',
+          path: ['score'],
+        });
+      }
+    } else {
+      if (signal.band !== qualitativeBand(signal.score)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Signal band must match its numeric score',
+          path: ['band'],
+        });
+      }
+      if (signal.status === 'insufficient') {
+        context.addIssue({
+          code: 'custom',
+          message: 'A numeric score requires complete or partial status',
+          path: ['status'],
+        });
+      }
+    }
+    if (signal.status === 'complete' && signal.missingInputs.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A complete score must not declare missing inputs',
+        path: ['missingInputs'],
+      });
+    }
+    if (signal.status === 'insufficient' && signal.missingInputs.length === 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'An insufficient score must declare missing inputs',
+        path: ['missingInputs'],
+      });
+    }
+  });
 
 export const REPORT_METRIC_IDS = [
   'close',
@@ -161,6 +202,18 @@ const reportContextSchema = z
           code: 'custom',
           message: `Signal cutoff must match cutoffs.${signal}`,
           path: ['signals', signal, 'cutoff'],
+        });
+      }
+    }
+
+    for (const resource of ['overview', 'history', 'fundamentals'] as const) {
+      const hasCutoff = value.cutoffs[resource] !== null;
+      const hasFreshness = value.freshness[resource] !== null;
+      if (hasCutoff !== hasFreshness) {
+        context.addIssue({
+          code: 'custom',
+          message: `${resource} cutoff and freshness must be present or absent together`,
+          path: ['freshness', resource],
         });
       }
     }

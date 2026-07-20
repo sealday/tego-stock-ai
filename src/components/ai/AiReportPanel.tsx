@@ -14,45 +14,30 @@ import {
   validateReportContext,
   type ReportContext,
   type ReportSection,
-  type ReportStructureFailureReason,
 } from '../../ai/report-contract';
+import {
+  createDraftReport,
+  type CompleteAiReport,
+  type DraftAiReport,
+} from '../../ai/report-model';
 import {
   sanitizeAiProviderSettings,
   validateAiProviderSettings,
   type AiProviderSettings,
-  type SanitizedAiProviderSettings,
-} from './AiSettings';
+} from '../../ai/provider-settings';
 import { DeterministicContext } from './DeterministicContext';
+
+export type {
+  CompleteAiReport,
+  DraftAiReport,
+  DraftReportReason,
+  GeneratedAiReport,
+} from '../../ai/report-model';
 
 export type AiReportStreamer = (
   configuration: AiClientConfiguration,
   messages: readonly AiChatMessage[],
 ) => AsyncIterable<AiStreamEvent>;
-
-export interface CompleteAiReport {
-  readonly status: 'complete';
-  readonly completedAt: string;
-  readonly provider: SanitizedAiProviderSettings;
-  readonly context: ReportContext;
-  readonly rawText: string;
-  readonly sections: readonly ReportSection[];
-}
-
-export type DraftReportReason = 'cancelled' | 'stream-interrupted' | 'contract-invalid';
-
-export interface DraftAiReport {
-  readonly status: 'draft';
-  readonly interruptedAt: string;
-  readonly provider: SanitizedAiProviderSettings;
-  readonly context: ReportContext;
-  readonly rawText: string;
-  readonly sections: readonly ReportSection[];
-  readonly reason: DraftReportReason;
-  readonly contractFailure?: ReportStructureFailureReason;
-  readonly errorMessage?: string;
-}
-
-export type GeneratedAiReport = CompleteAiReport | DraftAiReport;
 
 export interface AiReportPanelProps {
   readonly context: ReportContext;
@@ -231,13 +216,17 @@ export function AiReportPanel({
   }
 
   return (
-    <section className="workspace-panel ai-report" aria-labelledby="ai-report-heading">
+    <section
+      className="workspace-panel ai-report"
+      aria-labelledby="ai-report-heading"
+      aria-busy={phase === 'streaming'}
+    >
       <div className="panel-heading-row">
         <div>
           <p className="panel-kicker">用户主动生成 · 浏览器直连</p>
           <h2 id="ai-report-heading">AI 报告</h2>
         </div>
-        <ReportStatus phase={phase} draftReason={draftReason} />
+        <ReportStatus phase={phase} draftReason={draftReason} saved={saved} />
       </div>
 
       <DeterministicContext context={displayedContext} />
@@ -269,8 +258,6 @@ export function AiReportPanel({
           {errorMessage}
         </p>
       )}
-      {saved ? <p className="ai-report__saved">完整报告已交给本地保存回调</p> : null}
-
       {showReportSections ? (
         <div className="ai-report__sections" aria-label="AI 研究报告七章节">
           {visibleSections.map((section) => (
@@ -525,31 +512,6 @@ interface ActiveGeneration {
   draftDelivered: boolean;
 }
 
-interface DraftReportInput {
-  readonly context: ReportContext;
-  readonly settings: AiProviderSettings;
-  readonly rawText: string;
-  readonly sections: readonly ReportSection[];
-  readonly reason: DraftReportReason;
-  readonly contractFailure?: ReportStructureFailureReason;
-  readonly errorMessage?: string;
-  readonly now: () => Date;
-}
-
-function createDraftReport(input: DraftReportInput): DraftAiReport {
-  return {
-    status: 'draft',
-    interruptedAt: input.now().toISOString(),
-    provider: sanitizeAiProviderSettings(input.settings),
-    context: input.context,
-    rawText: input.rawText,
-    sections: input.sections,
-    reason: input.reason,
-    ...(input.contractFailure === undefined ? {} : { contractFailure: input.contractFailure }),
-    ...(input.errorMessage === undefined ? {} : { errorMessage: input.errorMessage }),
-  };
-}
-
 function emptySections(): readonly ReportSection[] {
   return REPORT_SECTION_HEADINGS.map((heading) => ({ heading, content: '' }));
 }
@@ -557,23 +519,39 @@ function emptySections(): readonly ReportSection[] {
 function ReportStatus({
   phase,
   draftReason,
+  saved,
 }: {
   readonly phase: ReportPhase;
   readonly draftReason: string | null;
+  readonly saved: boolean;
 }) {
-  if (phase === 'streaming') {
-    return <span className="ai-report__status">正在流式生成</span>;
-  }
-  if (phase === 'complete') {
-    return <span className="ai-report__status ai-report__status--complete">报告已完成</span>;
-  }
-  if (phase === 'draft') {
-    return <span className="ai-report__status">未完成草稿 · {draftReason}</span>;
-  }
-  if (phase === 'error') {
-    return <span className="ai-report__status">AI 生成失败</span>;
-  }
-  return <span className="ai-report__status">尚未生成</span>;
+  const status =
+    phase === 'streaming'
+      ? '正在流式生成'
+      : phase === 'complete'
+        ? '报告已完成'
+        : phase === 'draft'
+          ? `未完成草稿 · ${draftReason}`
+          : phase === 'error'
+            ? 'AI 生成失败'
+            : '尚未生成';
+
+  return (
+    <span
+      className={`ai-report__status${phase === 'complete' ? ' ai-report__status--complete' : ''}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span>{status}</span>
+      {phase === 'complete' && saved ? (
+        <>
+          {' · '}
+          <span>完整报告已交给本地保存回调</span>
+        </>
+      ) : null}
+    </span>
+  );
 }
 
 function ReportSectionContent({
