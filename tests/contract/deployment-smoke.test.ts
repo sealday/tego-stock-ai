@@ -756,6 +756,10 @@ describe('deployment evidence gates', () => {
       new URL('../../.github/workflows/ci.yml', import.meta.url),
       'utf8',
     );
+    const visualConfig = await readFile(
+      new URL('../../playwright.visual.config.ts', import.meta.url),
+      'utf8',
+    );
     const jobs = workflowJobs(workflow);
     expect([...jobs.keys()]).toEqual([
       'introduced-commit-policy',
@@ -800,11 +804,15 @@ describe('deployment evidence gates', () => {
     expect(browser).toContain('npm run test:browser');
     expect(browser).toMatch(/Upload Playwright report on failure\s*\n\s+if: failure\(\)/);
     expect(visual).toContain('runs-on: macos-26');
+    expect(visual).toContain("VISUAL_REFERENCE_RUNNER: 'github-macos-26-arm64'");
     expect(visual).toContain('npx playwright install chromium');
     expect(visual).toContain('npm run test:visual');
     expect(visual).toMatch(/Upload visual report on failure\s*\n\s+if: failure\(\)/);
     expect(visual).toContain('playwright-report/visual/');
     expect(visual).toContain('test-results/visual/');
+    expect(visualConfig).toContain("const visualReferenceRunner = 'github-macos-26-arm64';");
+    expect(visualConfig).toContain('process.env.VISUAL_REFERENCE_RUNNER');
+    expect(visualConfig).toContain("const localSnapshotLane = 'local-darwin-arm64';");
 
     const actions = [...workflow.matchAll(/^\s*uses:\s*(\S+)\s*$/gm)].map((match) => match[1]);
     expect(actions.length).toBeGreaterThan(0);

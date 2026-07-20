@@ -3,6 +3,8 @@ import { defineConfig } from '@playwright/test';
 delete process.env.NO_COLOR;
 
 const visualReferencePlatform = 'darwin-arm64';
+const visualReferenceRunner = 'github-macos-26-arm64';
+const localSnapshotLane = 'local-darwin-arm64';
 const currentPlatform = `${process.platform}-${process.arch}`;
 if (currentPlatform !== visualReferencePlatform) {
   throw new Error(
@@ -10,6 +12,14 @@ if (currentPlatform !== visualReferencePlatform) {
       'Run browser smoke tests here and move visual comparison to the configured baseline runner.',
   );
 }
+const configuredReferenceRunner = process.env.VISUAL_REFERENCE_RUNNER;
+if (process.env.CI && configuredReferenceRunner !== visualReferenceRunner) {
+  throw new Error(
+    `Visual CI requires VISUAL_REFERENCE_RUNNER=${visualReferenceRunner}; received ${configuredReferenceRunner ?? 'unset'}.`,
+  );
+}
+const snapshotLane =
+  configuredReferenceRunner === visualReferenceRunner ? visualReferenceRunner : localSnapshotLane;
 const port = resolvePlaywrightPort();
 const baseURL = `http://127.0.0.1:${port}`;
 
@@ -22,9 +32,10 @@ export default defineConfig({
   workers: 1,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report/visual' }]],
   outputDir: 'test-results/visual',
-  snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{projectName}/{arg}{ext}',
+  snapshotPathTemplate: `{testDir}/{testFilePath}-snapshots/${snapshotLane}/{projectName}/{arg}{ext}`,
   metadata: {
-    visualReferencePlatform: `${visualReferencePlatform} / Playwright 1.61.1 bundled Chromium`,
+    visualReferencePlatform: `${visualReferenceRunner} (${visualReferencePlatform}) / Playwright 1.61.1 bundled Chromium`,
+    visualSnapshotLane: snapshotLane,
   },
   expect: {
     toHaveScreenshot: {
