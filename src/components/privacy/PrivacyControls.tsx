@@ -9,7 +9,7 @@ import type { LocalRepository } from '../../storage/repository';
 
 export type PrivacyControlsRepository = Pick<
   LocalRepository,
-  'clearAll' | 'clearCredentials' | 'getSettings' | 'listReports' | 'listWatchlist'
+  'clearAll' | 'clearCredentials' | 'getExportSnapshot'
 >;
 
 export interface PrivacyControlsProps {
@@ -19,7 +19,9 @@ export interface PrivacyControlsProps {
     | ((serialized: string, exportedAt: string) => void | Promise<void>)
     | undefined;
   readonly onCredentialsCleared?: (() => void) | undefined;
+  readonly onAllClearStart?: (() => void) | undefined;
   readonly onAllCleared?: (() => void) | undefined;
+  readonly onAllClearFailure?: (() => void) | undefined;
 }
 
 type PrivacyAction = 'export' | 'credentials' | 'all';
@@ -29,7 +31,9 @@ export function PrivacyControls({
   now,
   download = downloadLocalDataExport,
   onCredentialsCleared,
+  onAllClearStart,
   onAllCleared,
+  onAllClearFailure,
 }: PrivacyControlsProps) {
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [busy, setBusy] = useState<PrivacyAction | null>(null);
@@ -54,6 +58,9 @@ export function PrivacyControls({
     setBusy(action);
     setNotice(null);
     setFailedAction(null);
+    if (action === 'all') {
+      onAllClearStart?.();
+    }
     try {
       if (action === 'export') {
         const exported = await createLocalDataExport(repository, {
@@ -72,6 +79,9 @@ export function PrivacyControls({
       }
     } catch {
       setFailedAction(action);
+      if (action === 'all') {
+        onAllClearFailure?.();
+      }
     } finally {
       setBusy(null);
     }

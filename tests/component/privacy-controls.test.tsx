@@ -24,6 +24,7 @@ function databaseName(): string {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all([...databases].map((name) => deleteLocalDatabase(name)));
   databases.clear();
   vi.restoreAllMocks();
@@ -124,9 +125,9 @@ describe('PrivacyControls', () => {
     const repository = {
       clearAll: vi.fn<PrivacyControlsRepository['clearAll']>(),
       clearCredentials,
-      getSettings: vi.fn<PrivacyControlsRepository['getSettings']>().mockResolvedValue(null),
-      listReports: vi.fn<PrivacyControlsRepository['listReports']>().mockResolvedValue([]),
-      listWatchlist: vi.fn<PrivacyControlsRepository['listWatchlist']>().mockResolvedValue([]),
+      getExportSnapshot: vi
+        .fn<PrivacyControlsRepository['getExportSnapshot']>()
+        .mockResolvedValue({ watchlist: [], settings: null, reports: [] }),
     } satisfies PrivacyControlsRepository;
     render(<PrivacyControls repository={repository} />);
 
@@ -141,7 +142,47 @@ describe('PrivacyControls', () => {
     expect(clearCredentials).toHaveBeenCalledTimes(2);
   });
 
-  it('revokes the temporary Blob URL after starting a JSON download', () => {
+  it('reports clear-all start, failure, and retry success at the matching lifecycle boundaries', async () => {
+    const user = userEvent.setup();
+    const clearAll = vi
+      .fn<PrivacyControlsRepository['clearAll']>()
+      .mockRejectedValueOnce(new Error('clear failed'))
+      .mockResolvedValueOnce();
+    const repository = {
+      clearAll,
+      clearCredentials: vi.fn<PrivacyControlsRepository['clearCredentials']>(),
+      getExportSnapshot: vi
+        .fn<PrivacyControlsRepository['getExportSnapshot']>()
+        .mockResolvedValue({ watchlist: [], settings: null, reports: [] }),
+    } satisfies PrivacyControlsRepository;
+    const onAllClearStart = vi.fn();
+    const onAllCleared = vi.fn();
+    const onAllClearFailure = vi.fn();
+    render(
+      <PrivacyControls
+        repository={repository}
+        onAllClearStart={onAllClearStart}
+        onAllCleared={onAllCleared}
+        onAllClearFailure={onAllClearFailure}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '清除全部本地数据' }));
+    await user.click(screen.getByRole('button', { name: '确认清除全部数据' }));
+    await screen.findByRole('alert');
+    expect(onAllClearStart).toHaveBeenCalledOnce();
+    expect(onAllClearFailure).toHaveBeenCalledOnce();
+    expect(onAllCleared).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '重试上一次操作' }));
+    expect(await screen.findByText('全部本地数据已清除。')).toBeVisible();
+    expect(onAllClearStart).toHaveBeenCalledTimes(2);
+    expect(onAllClearFailure).toHaveBeenCalledOnce();
+    expect(onAllCleared).toHaveBeenCalledOnce();
+  });
+
+  it('removes the anchor immediately and revokes the Blob URL on the next task after download', () => {
+    vi.useFakeTimers();
     const click = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => undefined);
@@ -154,6 +195,26 @@ describe('PrivacyControls', () => {
     });
 
     expect(click).toHaveBeenCalledOnce();
+    expect(document.querySelector('a[download]')).toBeNull();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    vi.runAllTimers();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:tego-export');
+    vi.useRealTimers();
+  });
+
+  it('cleans up and revokes immediately when starting a download fails synchronously', () => {
+    const createObjectURL = vi.fn(() => 'blob:tego-export');
+    const revokeObjectURL = vi.fn();
+    vi.spyOn(document.body, 'append').mockImplementation(() => {
+      throw new Error('append failed');
+    });
+
+    expect(() =>
+      downloadLocalDataExport('{}\n', '2026-07-20T03:00:00.000Z', document, {
+        createObjectURL,
+        revokeObjectURL,
+      }),
+    ).toThrow('append failed');
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:tego-export');
     expect(document.querySelector('a[download]')).toBeNull();
   });

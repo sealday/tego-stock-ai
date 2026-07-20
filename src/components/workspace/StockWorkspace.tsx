@@ -7,7 +7,10 @@ import { FinancialTrendsPanel } from './FinancialTrendsPanel';
 import { FundamentalsPanel } from './FundamentalsPanel';
 import { OverviewPanel } from './OverviewPanel';
 import { TechnicalPanel } from './TechnicalPanel';
-import type { AiReportWorkspaceFocusRequest } from './AiReportWorkspace';
+import type {
+  AiReportWorkspaceFocusRequest,
+  AiReportWorkspaceRepository,
+} from './AiReportWorkspace';
 
 const AI_DESTINATION_IDS = ['saved-reports', 'ai-settings', 'local-privacy'] as const;
 type AiDestinationId = (typeof AI_DESTINATION_IDS)[number];
@@ -17,7 +20,25 @@ const AiReportWorkspace = lazy(async () => {
   return { default: module.default };
 });
 
-export function StockWorkspace({ state }: { readonly state: StockWorkspaceState }) {
+export interface StockWorkspaceProps {
+  readonly state: StockWorkspaceState;
+  readonly repository?: AiReportWorkspaceRepository | undefined;
+  readonly storageEpoch?: number | undefined;
+  readonly storageClearing?: boolean | undefined;
+  readonly onAllLocalClearStart?: (() => void) | undefined;
+  readonly onAllLocalClearSuccess?: (() => void) | undefined;
+  readonly onAllLocalClearFailure?: (() => void) | undefined;
+}
+
+export function StockWorkspace({
+  state,
+  repository,
+  storageEpoch = 0,
+  storageClearing = false,
+  onAllLocalClearStart,
+  onAllLocalClearSuccess,
+  onAllLocalClearFailure,
+}: StockWorkspaceProps) {
   const initialDestination = destinationFromHash(
     typeof window === 'undefined' ? '' : window.location.hash,
   );
@@ -50,19 +71,32 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
         sequence: (current?.sequence ?? 0) + 1,
       }));
     };
-    const revealCurrentHash = () => {
-      const destination = destinationFromHash(window.location.hash);
+    const revealCurrentHash = (event: HashChangeEvent) => {
+      const eventHash = new URL(event.newURL).hash;
+      if (eventHash !== window.location.hash) {
+        return;
+      }
+      const destination = destinationFromHash(eventHash);
       if (destination !== null) {
         reveal(destination);
       }
     };
     const revealClickedAnchor = (event: MouseEvent) => {
-      if (!(event.target instanceof Element)) {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey ||
+        !(event.target instanceof Element)
+      ) {
         return;
       }
       const anchor = event.target.closest('a');
-      const destination = destinationFromHash(anchor?.getAttribute('href') ?? '');
-      if (destination !== null) {
+      const href = anchor?.getAttribute('href') ?? '';
+      const destination = destinationFromHash(href);
+      if (destination !== null && window.location.hash === href) {
         reveal(destination);
       }
     };
@@ -168,7 +202,13 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
                 <AiReportWorkspace
                   state={state}
                   active={activeTab === tab.id}
+                  repository={repository}
                   focusRequest={focusRequest}
+                  storageEpoch={storageEpoch}
+                  storageClearing={storageClearing}
+                  onAllLocalClearStart={onAllLocalClearStart}
+                  onAllLocalClearSuccess={onAllLocalClearSuccess}
+                  onAllLocalClearFailure={onAllLocalClearFailure}
                 />
               </Suspense>
             ) : null

@@ -17,6 +17,7 @@ export interface TerminalShellProps {
   readonly watchlist?: readonly StockSearchResult[] | undefined;
   readonly watchlistLoading?: boolean | undefined;
   readonly watchlistBusy?: boolean | undefined;
+  readonly watchlistDisabled?: boolean | undefined;
   readonly watchlistNotice?: string | null | undefined;
   readonly watchlistError?: boolean | undefined;
   readonly onWatchlistAdd?: ((stock: StockSearchResult) => void) | undefined;
@@ -38,6 +39,7 @@ export function TerminalShell({
   watchlist = [],
   watchlistLoading = false,
   watchlistBusy = false,
+  watchlistDisabled = false,
   watchlistNotice = null,
   watchlistError = false,
   onWatchlistAdd,
@@ -46,11 +48,12 @@ export function TerminalShell({
   onWatchlistRetry,
   children,
 }: TerminalShellProps) {
-  const watchlistProps: WatchlistProps = {
+  const watchlistProps: Omit<WatchlistProps, 'announce'> = {
     stocks: watchlist,
     selectedStock,
     loading: watchlistLoading,
     busy: watchlistBusy,
+    disabled: watchlistDisabled,
     notice: watchlistNotice,
     error: watchlistError,
     ...(onWatchlistAdd === undefined ? {} : { onAdd: onWatchlistAdd }),
@@ -67,7 +70,7 @@ export function TerminalShell({
       <aside className="terminal-rail" aria-label="研究终端侧边栏">
         <TerminalIdentity />
         <Navigation />
-        <Watchlist {...watchlistProps} />
+        <Watchlist {...watchlistProps} announce />
       </aside>
 
       <div className="terminal-shell__body">
@@ -75,7 +78,7 @@ export function TerminalShell({
           <summary>展开导航</summary>
           <div className="compact-navigation__content">
             <Navigation />
-            <Watchlist {...watchlistProps} />
+            <Watchlist {...watchlistProps} announce={false} />
           </div>
         </details>
 
@@ -165,6 +168,8 @@ interface WatchlistProps {
   readonly selectedStock: StockSearchResult | null;
   readonly loading: boolean;
   readonly busy: boolean;
+  readonly disabled: boolean;
+  readonly announce: boolean;
   readonly notice: string | null;
   readonly error: boolean;
   readonly onAdd?: ((stock: StockSearchResult) => void) | undefined;
@@ -178,6 +183,8 @@ function Watchlist({
   selectedStock,
   loading,
   busy,
+  disabled,
+  announce,
   notice,
   error,
   onAdd,
@@ -194,7 +201,7 @@ function Watchlist({
         {selectedStock === null || onAdd === undefined ? null : (
           <button
             type="button"
-            disabled={busy || selectedAlreadySaved}
+            disabled={busy || disabled || selectedAlreadySaved}
             aria-label={
               selectedAlreadySaved
                 ? `${selectedStock.name}已在本地自选股`
@@ -229,7 +236,7 @@ function Watchlist({
                 <button
                   type="button"
                   className="terminal-watchlist__remove"
-                  disabled={busy}
+                  disabled={busy || disabled}
                   aria-label={`删除${stock.name} ${stock.code}`}
                   onClick={() => onRemove(stock)}
                 >
@@ -240,12 +247,12 @@ function Watchlist({
           ))}
         </ul>
       )}
-      {notice === null ? null : <p role="status">{notice}</p>}
+      {notice === null ? null : <p role={announce ? 'status' : undefined}>{notice}</p>}
       {error ? (
-        <div className="terminal-watchlist__error" role="alert">
+        <div className="terminal-watchlist__error" role={announce ? 'alert' : undefined}>
           <p>本地自选股操作失败，已保存数据未宣称更改。</p>
           {onRetry === undefined ? null : (
-            <button type="button" disabled={busy} onClick={onRetry}>
+            <button type="button" disabled={busy || disabled} onClick={onRetry}>
               重试本地自选股操作
             </button>
           )}

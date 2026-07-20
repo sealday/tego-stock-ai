@@ -3,7 +3,9 @@ import { createChart } from 'lightweight-charts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { REPORT_SECTION_HEADINGS } from '../../src/ai/report-contract';
+import { DEFAULT_AI_PROVIDER_SETTINGS } from '../../src/ai/provider-settings';
 import { StockWorkspace } from '../../src/components/workspace/StockWorkspace';
+import type { AiReportWorkspaceRepository } from '../../src/components/workspace/AiReportWorkspace';
 import {
   isoDate,
   stockCode,
@@ -250,6 +252,27 @@ function differentReadyState(): StockWorkspaceState {
   };
 }
 
+function aiWorkspaceRepository(
+  overrides: Partial<AiReportWorkspaceRepository> = {},
+): AiReportWorkspaceRepository {
+  return {
+    clearAll: vi.fn(async () => undefined),
+    clearCredentials: vi.fn(async () => undefined),
+    deleteReport: vi.fn(async () => undefined),
+    getExportSnapshot: vi.fn(async () => ({ watchlist: [], settings: null, reports: [] })),
+    getSettings: vi.fn(async () => DEFAULT_AI_PROVIDER_SETTINGS),
+    listReports: vi.fn(async () => []),
+    listWatchlist: vi.fn(async () => []),
+    saveReport: vi.fn(async (report) => ({
+      id: 'saved-report',
+      savedAt: '2026-07-20T00:00:00.000Z',
+      report,
+    })),
+    saveSettings: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
+
 type WorkspaceEndpoint = 'overview' | 'history' | 'fundamentals' | 'marketStatus';
 
 function validWorkspaceBodies(): Record<WorkspaceEndpoint, MarketEnvelope<unknown>> {
@@ -325,6 +348,30 @@ describe('StockWorkspace', () => {
     expect(document.getElementById('ai-settings')).toBe(document.activeElement);
   });
 
+  it('focuses a newly hashed AI destination once and ignores modified or prevented clicks', async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    render(
+      <>
+        <a href="#ai-settings">正常打开 AI 设置</a>
+        <a href="#saved-reports">修改键打开报告</a>
+        <a href="#local-privacy" onClick={(event) => event.preventDefault()}>
+          已阻止的本地隐私链接
+        </a>
+        <StockWorkspace state={readyState()} />
+      </>,
+    );
+
+    fireEvent.click(screen.getByRole('link', { name: '修改键打开报告' }), { metaKey: true });
+    fireEvent.click(screen.getByRole('link', { name: '已阻止的本地隐私链接' }));
+    expect(screen.getByRole('tab', { name: '概览' }).getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.click(screen.getByRole('link', { name: '正常打开 AI 设置' }));
+    const destination = (await screen.findByLabelText('模型标识符')).closest('#ai-settings');
+    await waitFor(() => expect(window.location.hash).toBe('#ai-settings'));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+    expect(focus.mock.instances.filter((instance) => instance === destination)).toHaveLength(1);
+  });
+
   it('loads the optional AI workspace only after first activation', async () => {
     const { container } = render(<StockWorkspace state={readyState()} />);
 
@@ -394,6 +441,54 @@ describe('StockWorkspace', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('keeps a failed draft auto-save in the session and retries it without duplication', async () => {
+    const partialReport = '## 数据摘要与截止日期\n待重试草稿。';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Promise.resolve(
+          new Response(
+            `data: ${JSON.stringify({ choices: [{ delta: { content: partialReport } }] })}\n\n`,
+            { status: 200, headers: { 'content-type': 'text/event-stream' } },
+          ),
+        ),
+      ),
+    );
+    const saveReport = vi
+      .fn<AiReportWorkspaceRepository['saveReport']>()
+      .mockRejectedValueOnce(new Error('IndexedDB internals'))
+      .mockImplementationOnce(async (report) => ({
+        id: 'draft-after-retry',
+        savedAt: '2026-07-20T00:00:00.000Z',
+        report,
+      }));
+    const repository = aiWorkspaceRepository({ saveReport });
+
+    render(<StockWorkspace state={readyState()} repository={repository} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'AI 报告' }));
+    await screen.findByRole('heading', { name: 'AI 提供商设置' });
+    fireEvent.change(screen.getByLabelText('模型标识符'), {
+      target: { value: 'research-model' },
+    });
+    fireEvent.change(screen.getByLabelText('API key'), {
+      target: { value: 'sk-session-only' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+
+    expect(await screen.findByText('未完成草稿 · 流式响应中断')).toBeVisible();
+    const alert = await screen.findByText('草稿尚未保存到当前浏览器，请重试。');
+    expect(alert.textContent).toContain('草稿尚未保存到当前浏览器');
+    expect(alert.textContent).not.toContain('IndexedDB');
+    expect(screen.getByText('当前页面会话已保留 1 份完整报告或未完成草稿。')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '重试保存未完成草稿' }));
+
+    await waitFor(() => expect(saveReport).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: '重试保存未完成草稿' })).toBeNull(),
+    );
+    expect(screen.getByText('当前页面会话已保留 1 份完整报告或未完成草稿。')).toBeVisible();
   });
 
   it('keeps an in-flight report mounted across a non-null to null to non-null context transition', async () => {

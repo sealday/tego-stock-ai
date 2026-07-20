@@ -1,7 +1,7 @@
 import type { SanitizedAiProviderSettings } from '../ai/provider-settings';
 import { sanitizeAiProviderSettings } from '../ai/provider-settings';
 import { invalidStoredData } from './database';
-import type { LocalRepository, SavedReport } from './repository';
+import type { LocalExportSnapshot, LocalRepository, SavedReport } from './repository';
 
 export const LOCAL_EXPORT_SCHEMA = 'tego-stock-ai-local-export';
 export const LOCAL_EXPORT_VERSION = 1;
@@ -19,18 +19,15 @@ export interface CreateLocalDataExportOptions {
   readonly now?: (() => Date) | undefined;
 }
 
-type ExportRepository = Pick<LocalRepository, 'getSettings' | 'listReports' | 'listWatchlist'>;
+type ExportRepository = Pick<LocalRepository, 'getExportSnapshot'>;
 
 export async function createLocalDataExport(
   repository: ExportRepository,
   options: CreateLocalDataExportOptions = {},
 ): Promise<LocalDataExport> {
   const now = options.now ?? (() => new Date());
-  const [watchlist, settings, reports] = await Promise.all([
-    repository.listWatchlist(),
-    repository.getSettings(),
-    repository.listReports(),
-  ]);
+  const { watchlist, settings, reports }: LocalExportSnapshot =
+    await repository.getExportSnapshot();
   let exportedAt: string;
   try {
     exportedAt = now().toISOString();
@@ -65,11 +62,20 @@ export function downloadLocalDataExport(
   anchor.href = objectUrl;
   anchor.download = `tego-stock-ai-local-export-${date}.json`;
   anchor.hidden = true;
-  documentReference.body.append(anchor);
+  let downloadStarted = false;
   try {
+    documentReference.body.append(anchor);
     anchor.click();
+    downloadStarted = true;
   } finally {
-    anchor.remove();
-    urlApi.revokeObjectURL(objectUrl);
+    try {
+      anchor.remove();
+    } finally {
+      if (downloadStarted) {
+        globalThis.setTimeout(() => urlApi.revokeObjectURL(objectUrl), 0);
+      } else {
+        urlApi.revokeObjectURL(objectUrl);
+      }
+    }
   }
 }

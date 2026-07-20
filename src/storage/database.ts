@@ -48,6 +48,7 @@ export interface OpenLocalDatabaseOptions {
   readonly version?: number;
   readonly indexedDB?: IDBFactory | null;
   readonly migrate?: LocalDatabaseMigration;
+  readonly onVersionChange?: ((database: IDBDatabase) => void) | undefined;
 }
 
 export interface LocalTransaction {
@@ -77,6 +78,14 @@ export async function openLocalDatabase(
   return new Promise<IDBDatabase>((resolve, reject) => {
     let request: IDBOpenDBRequest;
     let migrationFailure: unknown;
+    let settled = false;
+    const rejectOnce = (error: LocalStorageError) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    };
     try {
       request = factory.open(name, version);
     } catch (cause) {
@@ -102,10 +111,10 @@ export async function openLocalDatabase(
       }
     };
     request.onblocked = () => {
-      reject(new LocalStorageError('OPEN_FAILED'));
+      rejectOnce(new LocalStorageError('OPEN_FAILED'));
     };
     request.onerror = () => {
-      reject(
+      rejectOnce(
         migrationFailure === undefined
           ? new LocalStorageError('OPEN_FAILED', { cause: request.error })
           : new LocalStorageError('MIGRATION_FAILED', { cause: migrationFailure }),
@@ -113,7 +122,15 @@ export async function openLocalDatabase(
     };
     request.onsuccess = () => {
       const database = request.result;
-      database.onversionchange = () => database.close();
+      if (settled) {
+        database.close();
+        return;
+      }
+      settled = true;
+      database.onversionchange = () => {
+        database.close();
+        options.onVersionChange?.(database);
+      };
       resolve(database);
     };
   });
@@ -154,6 +171,7 @@ export async function runLocalTransaction<T>(
     let transactionCompleted = false;
     let result: T | undefined;
     let settled = false;
+    let failure: LocalStorageError | undefined;
 
     const rejectOnce = (cause: unknown) => {
       if (settled) {
@@ -172,13 +190,17 @@ export async function runLocalTransaction<T>(
 
     rawTransaction.oncomplete = () => {
       transactionCompleted = true;
-      resolveWhenComplete();
+      if (failure === undefined) {
+        resolveWhenComplete();
+      } else {
+        rejectOnce(failure);
+      }
     };
     rawTransaction.onabort = () => {
-      rejectOnce(rawTransaction.error);
+      rejectOnce(failure ?? rawTransaction.error);
     };
     rawTransaction.onerror = () => {
-      rejectOnce(rawTransaction.error);
+      failure ??= storageError(rawTransaction.error, 'TRANSACTION_FAILED');
     };
 
     const boundary = createTransactionBoundary(rawTransaction, storeNames);
@@ -190,12 +212,12 @@ export async function runLocalTransaction<T>(
         resolveWhenComplete();
       })
       .catch((cause: unknown) => {
+        failure ??= storageError(cause, 'TRANSACTION_FAILED');
         try {
           rawTransaction.abort();
         } catch {
-          // The transaction may already have failed; reject with the original safe error.
+          rejectOnce(failure);
         }
-        rejectOnce(cause);
       });
   });
 }

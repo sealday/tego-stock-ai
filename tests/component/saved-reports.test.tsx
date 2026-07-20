@@ -161,6 +161,9 @@ function workspaceRepository(
     clearAll: vi.fn<AiReportWorkspaceRepository['clearAll']>().mockResolvedValue(),
     clearCredentials: vi.fn<AiReportWorkspaceRepository['clearCredentials']>().mockResolvedValue(),
     deleteReport: vi.fn<AiReportWorkspaceRepository['deleteReport']>().mockResolvedValue(),
+    getExportSnapshot: vi
+      .fn<AiReportWorkspaceRepository['getExportSnapshot']>()
+      .mockResolvedValue({ watchlist: [], settings: null, reports: [] }),
     getSettings: vi
       .fn<AiReportWorkspaceRepository['getSettings']>()
       .mockResolvedValue(DEFAULT_AI_PROVIDER_SETTINGS),

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiProviderSettings } from '../../src/ai/provider-settings';
 import type { GeneratedAiReport } from '../../src/ai/report-model';
 import { REPORT_SECTION_HEADINGS } from '../../src/ai/report-parser';
+import { stockCode } from '../../src/domain/stock';
 import {
   LOCAL_DATABASE_VERSION,
   LOCAL_STORE_NAMES,
@@ -367,6 +368,54 @@ describe('LocalRepository', () => {
     await repository.close();
   });
 
+  it('deletes corrupt provider settings fail-closed when clearing credentials', async () => {
+    const name = databaseName('corrupt-credentials');
+    const database = await openLocalDatabase({ name });
+    await runLocalTransaction(database, ['providerSettings'], 'readwrite', (transaction) =>
+      transaction.put('providerSettings', {
+        id: 'current',
+        schemaVersion: 1,
+        baseUrl: 'not-a-valid-provider-url',
+        model: 'research-model',
+        rememberApiKey: false,
+        apiKey: 'physically-present-secret',
+        updatedAt: '2026-07-20T01:00:00.000Z',
+      }),
+    );
+    database.close();
+
+    const repository = new LocalRepository({ name });
+    await expect(repository.clearCredentials()).resolves.toBeUndefined();
+    await expect(repository.getSettings()).resolves.toBeNull();
+    await expect(storedProviderSettings(name)).resolves.toBeUndefined();
+    await repository.close();
+  });
+
+  it('reopens after versionchange closes and invalidates the cached connection', async () => {
+    const name = databaseName('versionchange');
+    const open = vi.spyOn(indexedDB, 'open');
+    const onVersionChange = vi.fn(() => {
+      throw new Error('consumer callback failed');
+    });
+    const repository = new LocalRepository({ name, onVersionChange });
+    await repository.listWatchlist();
+    const firstRequest = open.mock.results[0]?.value;
+    if (!(firstRequest instanceof IDBOpenDBRequest)) {
+      throw new TypeError('Expected a real IndexedDB open request');
+    }
+
+    expect(() =>
+      firstRequest.result.onversionchange?.call(
+        firstRequest.result,
+        new Event('versionchange') as IDBVersionChangeEvent,
+      ),
+    ).toThrow('consumer callback failed');
+    expect(onVersionChange).toHaveBeenCalledOnce();
+    await expect(repository.listWatchlist()).resolves.toEqual([]);
+    expect(open).toHaveBeenCalledTimes(2);
+    await repository.close();
+  });
+
   it('deletes one report without removing the remaining local history', async () => {
     const ids = ['complete-one', 'draft-one'];
     const repository = new LocalRepository({
@@ -418,6 +467,62 @@ describe('LocalRepository', () => {
     await repository.close();
   });
 
+  it('does not start clearAll until an earlier invoked mutation has settled', async () => {
+    const name = databaseName('mutation-order');
+    const database = await openLocalDatabase({ name });
+    const transaction = vi.spyOn(database, 'transaction');
+    const request = {
+      transaction: null,
+      result: database,
+      error: null,
+      onupgradeneeded: null,
+      onblocked: null,
+      onerror: null,
+      onsuccess: null,
+    } as unknown as IDBOpenDBRequest;
+    const factory = { open: vi.fn(() => request) } as unknown as IDBFactory;
+    const repository = new LocalRepository({ name, indexedDB: factory });
+
+    const write = repository.putWatchlistEntry({
+      code: '600519.SH',
+      name: '贵州茅台',
+      pinyinAbbreviation: 'GZMT',
+    });
+    const clear = repository.clearAll();
+    await Promise.resolve();
+    request.onsuccess?.call(request, new Event('success'));
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    await write;
+    await clear;
+    await expect(repository.listWatchlist()).resolves.toEqual([]);
+    await repository.close();
+  });
+
+  it('allows a later mutation after an earlier queued mutation fails', async () => {
+    const repository = new LocalRepository({ name: databaseName('mutation-recovery') });
+
+    await expect(
+      repository.saveSettings({
+        baseUrl: 'invalid-url',
+        model: 'research-model',
+        apiKey: '',
+        rememberApiKey: false,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_DATA' });
+    await expect(
+      repository.putWatchlistEntry({
+        code: '600519.SH',
+        name: '贵州茅台',
+        pinyinAbbreviation: 'GZMT',
+      }),
+    ).resolves.toBeUndefined();
+    await repository.close();
+  });
+
   it('maps unavailable storage and transaction failures to typed safe errors', async () => {
     const unavailable = new LocalRepository({
       name: databaseName('unavailable'),
@@ -433,6 +538,29 @@ describe('LocalRepository', () => {
 });
 
 describe('local data export', () => {
+  it('uses one repository snapshot instead of mixing independent reads', async () => {
+    const snapshot = {
+      watchlist: [{ code: stockCode('600519.SH'), name: '贵州茅台', pinyinAbbreviation: 'GZMT' }],
+      settings: rememberedSettings(),
+      reports: [],
+    };
+    const getExportSnapshot = vi.fn(async () => snapshot);
+    const repository = {
+      getExportSnapshot,
+      listWatchlist: vi.fn(async () => [
+        { code: stockCode('000001.SZ'), name: '平安银行', pinyinAbbreviation: 'PAYH' },
+      ]),
+      getSettings: vi.fn(async () => null),
+      listReports: vi.fn(async () => []),
+    };
+
+    const exported = await createLocalDataExport(repository);
+
+    expect(exported.watchlist).toEqual(snapshot.watchlist);
+    expect(exported.settings).toMatchObject({ model: 'research-model' });
+    expect(getExportSnapshot).toHaveBeenCalledOnce();
+  });
+
   it('is deterministic, versioned, and omits remembered API keys from JSON', async () => {
     const repository = new LocalRepository({
       name: databaseName('export'),

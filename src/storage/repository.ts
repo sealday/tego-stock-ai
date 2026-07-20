@@ -31,6 +31,12 @@ export interface SavedReport {
   readonly report: GeneratedAiReport;
 }
 
+export interface LocalExportSnapshot {
+  readonly watchlist: readonly StockSearchResult[];
+  readonly settings: AiProviderSettings | null;
+  readonly reports: readonly SavedReport[];
+}
+
 export interface LocalRepositoryOptions extends OpenLocalDatabaseOptions {
   readonly now?: (() => Date) | undefined;
   readonly createId?: (() => string) | undefined;
@@ -172,6 +178,7 @@ const storedReportSchema = z.strictObject({
 
 export class LocalRepository {
   private databasePromise: Promise<IDBDatabase> | undefined;
+  private mutationTail: Promise<void> = Promise.resolve();
   private readonly databaseOptions: OpenLocalDatabaseOptions;
   private readonly now: () => Date;
   private readonly createId: () => string;
@@ -182,6 +189,9 @@ export class LocalRepository {
       ...(options.version === undefined ? {} : { version: options.version }),
       ...(options.indexedDB === undefined ? {} : { indexedDB: options.indexedDB }),
       ...(options.migrate === undefined ? {} : { migrate: options.migrate }),
+      ...(options.onVersionChange === undefined
+        ? {}
+        : { onVersionChange: options.onVersionChange }),
     };
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? defaultReportId;
@@ -205,27 +215,69 @@ export class LocalRepository {
     readonly pinyinAbbreviation: string;
   }): Promise<void> {
     const normalized = validateWatchlistInput(entry);
-    const database = await this.database();
-    await runLocalTransaction(database, ['watchlists'], 'readwrite', async (transaction) => {
-      const existing = await transaction.get<StoredWatchlistRecord>('watchlists', normalized.code);
-      const timestamp = validTimestamp(this.now());
-      const record: StoredWatchlistRecord = {
-        schemaVersion: LOCAL_RECORD_SCHEMA_VERSION,
-        code: normalized.code,
-        name: normalized.name,
-        pinyinAbbreviation: normalized.pinyinAbbreviation,
-        createdAt: existing === undefined ? timestamp : validateWatchlistRecord(existing).createdAt,
-        updatedAt: timestamp,
-      };
-      await transaction.put('watchlists', record);
+    await this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(database, ['watchlists'], 'readwrite', async (transaction) => {
+        const existing = await transaction.get<StoredWatchlistRecord>(
+          'watchlists',
+          normalized.code,
+        );
+        const timestamp = validTimestamp(this.now());
+        const record: StoredWatchlistRecord = {
+          schemaVersion: LOCAL_RECORD_SCHEMA_VERSION,
+          code: normalized.code,
+          name: normalized.name,
+          pinyinAbbreviation: normalized.pinyinAbbreviation,
+          createdAt:
+            existing === undefined ? timestamp : validateWatchlistRecord(existing).createdAt,
+          updatedAt: timestamp,
+        };
+        await transaction.put('watchlists', record);
+      });
     });
   }
 
   async removeWatchlistEntry(code: string): Promise<void> {
     const normalizedCode = validStockCode(code);
+    await this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(database, ['watchlists'], 'readwrite', (transaction) =>
+        transaction.delete('watchlists', normalizedCode),
+      );
+    });
+  }
+
+  async getExportSnapshot(): Promise<LocalExportSnapshot> {
     const database = await this.database();
-    await runLocalTransaction(database, ['watchlists'], 'readwrite', (transaction) =>
-      transaction.delete('watchlists', normalizedCode),
+    return runLocalTransaction(
+      database,
+      ['watchlists', 'providerSettings', 'reports'],
+      'readonly',
+      async (transaction) => {
+        const [watchlistRecords, settingsRecord, reportRecords] = await Promise.all([
+          transaction.getAll<StoredWatchlistRecord>('watchlists'),
+          transaction.get<StoredProviderSettingsRecord>('providerSettings', CURRENT_SETTINGS_ID),
+          transaction.getAll<StoredReportRecord>('reports'),
+        ]);
+        const watchlist = watchlistRecords
+          .map(validateWatchlistRecord)
+          .sort((left, right) => left.code.localeCompare(right.code))
+          .map(({ code, name, pinyinAbbreviation }) => ({
+            code: stockCode(code),
+            name,
+            pinyinAbbreviation,
+          }));
+        const settings =
+          settingsRecord === undefined ? null : providerSettingsFromRecord(settingsRecord);
+        const reports = reportRecords
+          .map(parseStoredReport)
+          .sort(
+            (left, right) =>
+              right.savedAt.localeCompare(left.savedAt) || left.id.localeCompare(right.id),
+          )
+          .map(({ id, savedAt, report }) => ({ id, savedAt, report }));
+        return { watchlist, settings, reports };
+      },
     );
   }
 
@@ -240,21 +292,17 @@ export class LocalRepository {
     if (record === undefined) {
       return null;
     }
-    const settings = parseStoredSettings(record);
-    return {
-      baseUrl: settings.baseUrl,
-      model: settings.model,
-      apiKey: settings.rememberApiKey ? (settings.apiKey ?? '') : '',
-      rememberApiKey: settings.rememberApiKey,
-    };
+    return providerSettingsFromRecord(record);
   }
 
   async saveSettings(settings: AiProviderSettings): Promise<void> {
     const record = storedSettingsFromInput(settings, this.now());
-    const database = await this.database();
-    await runLocalTransaction(database, ['providerSettings'], 'readwrite', (transaction) =>
-      transaction.put('providerSettings', record),
-    );
+    await this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(database, ['providerSettings'], 'readwrite', (transaction) =>
+        transaction.put('providerSettings', record),
+      );
+    });
   }
 
   async listReports(): Promise<readonly SavedReport[]> {
@@ -276,53 +324,77 @@ export class LocalRepository {
       savedAt: validTimestamp(this.now()),
       report: validatedReport,
     };
-    const database = await this.database();
-    await runLocalTransaction(database, ['reports'], 'readwrite', (transaction) =>
-      transaction.put('reports', record),
-    );
-    return { id: record.id, savedAt: record.savedAt, report: record.report };
+    return this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(database, ['reports'], 'readwrite', (transaction) =>
+        transaction.put('reports', record),
+      );
+      return { id: record.id, savedAt: record.savedAt, report: record.report };
+    });
   }
 
   async deleteReport(id: string): Promise<void> {
-    const database = await this.database();
-    await runLocalTransaction(database, ['reports'], 'readwrite', (transaction) =>
-      transaction.delete('reports', validRecordId(id)),
-    );
+    const validId = validRecordId(id);
+    await this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(database, ['reports'], 'readwrite', (transaction) =>
+        transaction.delete('reports', validId),
+      );
+    });
   }
 
   async clearCredentials(): Promise<void> {
-    const database = await this.database();
-    await runLocalTransaction(database, ['providerSettings'], 'readwrite', async (transaction) => {
-      const current = await transaction.get<StoredProviderSettingsRecord>(
-        'providerSettings',
-        CURRENT_SETTINGS_ID,
+    await this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(
+        database,
+        ['providerSettings'],
+        'readwrite',
+        async (transaction) => {
+          const current = await transaction.get<StoredProviderSettingsRecord>(
+            'providerSettings',
+            CURRENT_SETTINGS_ID,
+          );
+          if (current === undefined) {
+            return;
+          }
+          let settings: StoredProviderSettingsRecord;
+          try {
+            settings = parseStoredSettings(current);
+          } catch (cause) {
+            if (!(cause instanceof LocalStorageError) || cause.code !== 'INVALID_DATA') {
+              throw cause;
+            }
+            await transaction.delete('providerSettings', CURRENT_SETTINGS_ID);
+            return;
+          }
+          const cleared: StoredProviderSettingsRecord = {
+            id: CURRENT_SETTINGS_ID,
+            schemaVersion: LOCAL_RECORD_SCHEMA_VERSION,
+            baseUrl: settings.baseUrl,
+            model: settings.model,
+            rememberApiKey: false,
+            updatedAt: validTimestamp(this.now()),
+          };
+          await transaction.put('providerSettings', cleared);
+        },
       );
-      if (current === undefined) {
-        return;
-      }
-      const settings = parseStoredSettings(current);
-      const cleared: StoredProviderSettingsRecord = {
-        id: CURRENT_SETTINGS_ID,
-        schemaVersion: LOCAL_RECORD_SCHEMA_VERSION,
-        baseUrl: settings.baseUrl,
-        model: settings.model,
-        rememberApiKey: false,
-        updatedAt: validTimestamp(this.now()),
-      };
-      await transaction.put('providerSettings', cleared);
     });
   }
 
   async clearAll(): Promise<void> {
-    const database = await this.database();
-    await runLocalTransaction(database, LOCAL_STORE_NAMES, 'readwrite', async (transaction) => {
-      for (const storeName of LOCAL_STORE_NAMES) {
-        await transaction.clear(storeName);
-      }
+    await this.enqueueMutation(async () => {
+      const database = await this.database();
+      await runLocalTransaction(database, LOCAL_STORE_NAMES, 'readwrite', async (transaction) => {
+        for (const storeName of LOCAL_STORE_NAMES) {
+          await transaction.clear(storeName);
+        }
+      });
     });
   }
 
   async close(): Promise<void> {
+    await this.mutationTail;
     const promise = this.databasePromise;
     this.databasePromise = undefined;
     if (promise === undefined) {
@@ -344,7 +416,19 @@ export class LocalRepository {
   }
 
   private async database(): Promise<IDBDatabase> {
-    const attempt = this.databasePromise ?? openLocalDatabase(this.databaseOptions);
+    if (this.databasePromise !== undefined) {
+      return this.databasePromise;
+    }
+    let attempt: Promise<IDBDatabase>;
+    attempt = openLocalDatabase({
+      ...this.databaseOptions,
+      onVersionChange: (database) => {
+        if (this.databasePromise === attempt) {
+          this.databasePromise = undefined;
+          this.databaseOptions.onVersionChange?.(database);
+        }
+      },
+    });
     this.databasePromise = attempt;
     try {
       return await attempt;
@@ -354,6 +438,15 @@ export class LocalRepository {
       }
       throw cause;
     }
+  }
+
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationTail.then(operation);
+    this.mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 }
 
@@ -378,6 +471,16 @@ function storedSettingsFromInput(
 
 function parseStoredSettings(value: unknown): StoredProviderSettingsRecord {
   return parseOrInvalid(storedSettingsSchema, value);
+}
+
+function providerSettingsFromRecord(value: unknown): AiProviderSettings {
+  const settings = parseStoredSettings(value);
+  return {
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.rememberApiKey ? (settings.apiKey ?? '') : '',
+    rememberApiKey: settings.rememberApiKey,
+  };
 }
 
 function parseStoredReport(value: unknown): StoredReportRecord {

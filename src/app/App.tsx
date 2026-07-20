@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { TerminalShell } from '../components/layout/TerminalShell';
 import { StockWorkspace } from '../components/workspace/StockWorkspace';
+import type { AiReportWorkspaceRepository } from '../components/workspace/AiReportWorkspace';
 import { stockCode, type StockSearchResult } from '../domain/stock';
 import { toShanghaiIsoDate, useStockWorkspace } from '../hooks/use-stock-workspace';
 
@@ -11,14 +12,13 @@ const DEFAULT_STOCK: StockSearchResult = {
   pinyinAbbreviation: 'GZMT',
 };
 
-export interface WatchlistRepository {
-  listWatchlist(): Promise<readonly StockSearchResult[]>;
+export interface AppRepository extends AiReportWorkspaceRepository {
   putWatchlistEntry(entry: StockSearchResult): Promise<void>;
   removeWatchlistEntry(code: string): Promise<void>;
 }
 
 export interface AppProps {
-  readonly watchlistRepository?: WatchlistRepository | undefined;
+  readonly watchlistRepository?: AppRepository | undefined;
 }
 
 type FailedWatchlistAction =
@@ -32,17 +32,22 @@ export function App({ watchlistRepository }: AppProps = {}) {
   const [watchlistLoading, setWatchlistLoading] = useState(true);
   const [watchlistBusy, setWatchlistBusy] = useState(false);
   const [watchlistNotice, setWatchlistNotice] = useState<string | null>(null);
+  const [storageEpoch, setStorageEpoch] = useState(0);
+  const [storageClearing, setStorageClearing] = useState(false);
   const [failedWatchlistAction, setFailedWatchlistAction] = useState<FailedWatchlistAction | null>(
     null,
   );
-  const [repositoryPromise] = useState<Promise<WatchlistRepository>>(() =>
-    watchlistRepository === undefined
-      ? import('../storage/repository').then(({ LocalRepository }) => new LocalRepository())
-      : Promise.resolve(watchlistRepository),
+  const [repository] = useState<AppRepository>(
+    () =>
+      watchlistRepository ??
+      deferredRepository(
+        import('../storage/repository').then(({ LocalRepository }) => new LocalRepository()),
+      ),
   );
   const mounted = useRef(true);
   const hydrationRequest = useRef(0);
   const mutationRevision = useRef(0);
+  const storageEpochReference = useRef(0);
   const asOf = toShanghaiIsoDate(new Date());
   const workspace = useStockWorkspace({ code: selectedStock.code, asOf });
 
@@ -50,31 +55,43 @@ export function App({ watchlistRepository }: AppProps = {}) {
     const request = hydrationRequest.current + 1;
     hydrationRequest.current = request;
     const revision = mutationRevision.current;
+    const epoch = storageEpochReference.current;
     setWatchlistLoading(true);
     setFailedWatchlistAction(null);
-    void repositoryPromise
-      .then((repository) => repository.listWatchlist())
+    void repository
+      .listWatchlist()
       .then((storedWatchlist) => {
         if (
           mounted.current &&
           hydrationRequest.current === request &&
-          mutationRevision.current === revision
+          mutationRevision.current === revision &&
+          storageEpochReference.current === epoch
         ) {
           setWatchlist(storedWatchlist);
           setWatchlistNotice(null);
         }
       })
       .catch(() => {
-        if (mounted.current && hydrationRequest.current === request) {
+        if (
+          mounted.current &&
+          hydrationRequest.current === request &&
+          mutationRevision.current === revision &&
+          storageEpochReference.current === epoch
+        ) {
           setFailedWatchlistAction({ type: 'load' });
         }
       })
       .finally(() => {
-        if (mounted.current && hydrationRequest.current === request) {
+        if (
+          mounted.current &&
+          hydrationRequest.current === request &&
+          mutationRevision.current === revision &&
+          storageEpochReference.current === epoch
+        ) {
           setWatchlistLoading(false);
         }
       });
-  }, [repositoryPromise]);
+  }, [repository]);
 
   useEffect(() => {
     mounted.current = true;
@@ -85,44 +102,50 @@ export function App({ watchlistRepository }: AppProps = {}) {
   }, [loadWatchlist]);
 
   const addToWatchlist = async (stock: StockSearchResult) => {
+    if (watchlistLoading || storageClearing) {
+      return;
+    }
     mutationRevision.current += 1;
+    const epoch = storageEpochReference.current;
     setWatchlistBusy(true);
     setFailedWatchlistAction(null);
     try {
-      const repository = await repositoryPromise;
       await repository.putWatchlistEntry(stock);
-      if (mounted.current) {
+      if (mounted.current && storageEpochReference.current === epoch) {
         setWatchlist((current) => sortWatchlist([...withoutStock(current, stock.code), stock]));
         setWatchlistNotice(`${stock.name}已保存到当前浏览器的本地自选股。`);
       }
     } catch {
-      if (mounted.current) {
+      if (mounted.current && storageEpochReference.current === epoch) {
         setFailedWatchlistAction({ type: 'add', stock });
       }
     } finally {
-      if (mounted.current) {
+      if (mounted.current && storageEpochReference.current === epoch) {
         setWatchlistBusy(false);
       }
     }
   };
 
   const removeFromWatchlist = async (stock: StockSearchResult) => {
+    if (watchlistLoading || storageClearing) {
+      return;
+    }
     mutationRevision.current += 1;
+    const epoch = storageEpochReference.current;
     setWatchlistBusy(true);
     setFailedWatchlistAction(null);
     try {
-      const repository = await repositoryPromise;
       await repository.removeWatchlistEntry(stock.code);
-      if (mounted.current) {
+      if (mounted.current && storageEpochReference.current === epoch) {
         setWatchlist((current) => withoutStock(current, stock.code));
         setWatchlistNotice(`${stock.name}已从当前浏览器的本地自选股删除。`);
       }
     } catch {
-      if (mounted.current) {
+      if (mounted.current && storageEpochReference.current === epoch) {
         setFailedWatchlistAction({ type: 'remove', stock });
       }
     } finally {
-      if (mounted.current) {
+      if (mounted.current && storageEpochReference.current === epoch) {
         setWatchlistBusy(false);
       }
     }
@@ -136,6 +159,29 @@ export function App({ watchlistRepository }: AppProps = {}) {
     } else {
       loadWatchlist();
     }
+  };
+
+  const allLocalClearStarted = () => {
+    storageEpochReference.current += 1;
+    mutationRevision.current += 1;
+    hydrationRequest.current += 1;
+    setStorageEpoch(storageEpochReference.current);
+    setStorageClearing(true);
+    setWatchlistBusy(false);
+    setFailedWatchlistAction(null);
+    setWatchlistNotice(null);
+  };
+
+  const allLocalClearSucceeded = () => {
+    setWatchlist([]);
+    setWatchlistLoading(false);
+    setStorageClearing(false);
+    setWatchlistNotice('当前浏览器的本地自选股已清空。');
+  };
+
+  const allLocalClearFailed = () => {
+    setStorageClearing(false);
+    loadWatchlist();
   };
 
   return (
@@ -156,6 +202,7 @@ export function App({ watchlistRepository }: AppProps = {}) {
       watchlist={watchlist}
       watchlistLoading={watchlistLoading}
       watchlistBusy={watchlistBusy}
+      watchlistDisabled={watchlistLoading || storageClearing}
       watchlistNotice={watchlistNotice}
       watchlistError={failedWatchlistAction !== null}
       onWatchlistAdd={(stock) => void addToWatchlist(stock)}
@@ -164,9 +211,33 @@ export function App({ watchlistRepository }: AppProps = {}) {
       onWatchlistRetry={retryWatchlist}
     >
       <h1 className="visually-hidden">A 股研究终端</h1>
-      <StockWorkspace state={workspace} />
+      <StockWorkspace
+        state={workspace}
+        repository={repository}
+        storageEpoch={storageEpoch}
+        storageClearing={storageClearing}
+        onAllLocalClearStart={allLocalClearStarted}
+        onAllLocalClearSuccess={allLocalClearSucceeded}
+        onAllLocalClearFailure={allLocalClearFailed}
+      />
     </TerminalShell>
   );
+}
+
+function deferredRepository(repository: Promise<AppRepository>): AppRepository {
+  return {
+    clearAll: () => repository.then((value) => value.clearAll()),
+    clearCredentials: () => repository.then((value) => value.clearCredentials()),
+    deleteReport: (id) => repository.then((value) => value.deleteReport(id)),
+    getExportSnapshot: () => repository.then((value) => value.getExportSnapshot()),
+    getSettings: () => repository.then((value) => value.getSettings()),
+    listReports: () => repository.then((value) => value.listReports()),
+    listWatchlist: () => repository.then((value) => value.listWatchlist()),
+    putWatchlistEntry: (entry) => repository.then((value) => value.putWatchlistEntry(entry)),
+    removeWatchlistEntry: (code) => repository.then((value) => value.removeWatchlistEntry(code)),
+    saveReport: (report) => repository.then((value) => value.saveReport(report)),
+    saveSettings: (settings) => repository.then((value) => value.saveSettings(settings)),
+  };
 }
 
 function withoutStock(

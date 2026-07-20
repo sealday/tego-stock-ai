@@ -288,6 +288,51 @@ describe('AiReportPanel', () => {
     expect(screen.getByText('完整报告已交给本地保存回调')).toBeVisible();
   });
 
+  it('reports a complete report as saved only after persistence succeeds and retries safely', async () => {
+    const user = userEvent.setup();
+    let rejectFirst: (reason?: unknown) => void = () => undefined;
+    let resolveSecond: () => void = () => undefined;
+    const firstSave = new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const secondSave = new Promise<void>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const onSaveReport = vi
+      .fn<(report: CompleteAiReport) => Promise<void>>()
+      .mockReturnValueOnce(firstSave)
+      .mockReturnValueOnce(secondSave);
+    render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={eventStream([{ type: 'delta', text: completeReport() }, { type: 'complete' }])}
+        onSaveReport={onSaveReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    await screen.findByText('报告已完成');
+    await user.click(screen.getByRole('button', { name: '保存完整报告' }));
+
+    const pendingButton = screen.getByRole('button', { name: '正在保存…' });
+    expect(pendingButton).toHaveProperty('disabled', true);
+    expect(onSaveReport).toHaveBeenCalledOnce();
+    expect(screen.queryByText('完整报告已交给本地保存回调')).toBeNull();
+    rejectFirst(new Error('IndexedDB internals'));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('完整报告未能保存到当前浏览器，请重试。');
+    expect(alert.textContent).not.toContain('IndexedDB');
+    await user.click(screen.getByRole('button', { name: '重试保存完整报告' }));
+    expect(onSaveReport).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: '正在保存…' })).toHaveProperty('disabled', true);
+    resolveSecond();
+
+    expect(await screen.findByText('完整报告已交给本地保存回调')).toBeVisible();
+    expect(screen.queryByText('完整报告未能保存到当前浏览器，请重试。')).toBeNull();
+  });
+
   it('cancels an active stream and hands off one non-saveable draft', async () => {
     const user = userEvent.setup();
     const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
@@ -777,6 +822,45 @@ describe('AiReportPanel', () => {
 
     expect(screen.getByRole('button', { name: '生成 AI 报告' })).toHaveProperty('disabled', true);
     expect(screen.getByText(/请先填写有效的 Base URL、模型和 API key/)).toBeVisible();
+  });
+
+  it('invalidates an old generation on a storage epoch change without delivering a draft', async () => {
+    const user = userEvent.setup();
+    const onDraftReport = vi.fn<(report: DraftAiReport) => void>();
+    const stream: AiReportStreamer = async function* (configuration) {
+      yield { type: 'delta', text: '## 数据摘要与截止日期\n清空前的旧流。' };
+      await new Promise<void>((resolve) => {
+        configuration.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      yield { type: 'aborted' };
+    };
+    const { rerender } = render(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        storageEpoch={0}
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '生成 AI 报告' }));
+    await screen.findByText('清空前的旧流。');
+    rerender(
+      <AiReportPanel
+        context={reportContext()}
+        settings={SETTINGS}
+        stream={stream}
+        storageEpoch={1}
+        storageDisabled
+        onDraftReport={onDraftReport}
+      />,
+    );
+
+    expect(await screen.findByText('尚未生成')).toBeVisible();
+    expect(screen.queryByText('清空前的旧流。')).toBeNull();
+    expect(screen.getByRole('button', { name: '生成 AI 报告' })).toHaveProperty('disabled', true);
+    await waitFor(() => expect(onDraftReport).not.toHaveBeenCalled());
   });
 
   it('keeps the in-memory report while rendering no hidden report content on an inactive tab', async () => {

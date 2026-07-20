@@ -46,9 +46,11 @@ export interface AiReportPanelProps {
   readonly context: ReportContext;
   readonly settings: AiProviderSettings;
   readonly active?: boolean;
+  readonly storageEpoch?: number;
+  readonly storageDisabled?: boolean;
   readonly stream?: AiReportStreamer;
-  readonly onSaveReport?: (report: CompleteAiReport) => void;
-  readonly onDraftReport?: (report: DraftAiReport) => void;
+  readonly onSaveReport?: (report: CompleteAiReport) => void | Promise<void>;
+  readonly onDraftReport?: (report: DraftAiReport) => void | Promise<void>;
   readonly now?: () => Date;
 }
 
@@ -65,6 +67,8 @@ export function AiReportPanel({
   context,
   settings,
   active = true,
+  storageEpoch = 0,
+  storageDisabled = false,
   stream = browserReportStreamer,
   onSaveReport,
   onDraftReport,
@@ -76,12 +80,16 @@ export function AiReportPanel({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [draftReason, setDraftReason] = useState<string | null>(null);
   const [completeReport, setCompleteReport] = useState<CompleteAiReport | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'failed' | 'saved'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const activeController = useRef<AbortController | null>(null);
   const activeGeneration = useRef<ActiveGeneration | null>(null);
   const generationId = useRef(0);
+  const saveAttemptId = useRef(0);
+  const saveInFlight = useRef(false);
+  const observedStorageEpoch = useRef(storageEpoch);
   const configurationErrors = validateAiProviderSettings(settings);
-  const canGenerate = Object.keys(configurationErrors).length === 0;
+  const canGenerate = Object.keys(configurationErrors).length === 0 && !storageDisabled;
   const showReportSections = phase === 'streaming' || phase === 'draft' || phase === 'complete';
   const displayedContext =
     showReportSections && capturedContext !== null ? capturedContext : context;
@@ -93,6 +101,27 @@ export function AiReportPanel({
     },
     [],
   );
+
+  useEffect(() => {
+    if (observedStorageEpoch.current === storageEpoch) {
+      return;
+    }
+    observedStorageEpoch.current = storageEpoch;
+    generationId.current += 1;
+    activeController.current?.abort();
+    activeController.current = null;
+    activeGeneration.current = null;
+    setPhase('idle');
+    setVisibleSections(emptySections());
+    setCapturedContext(null);
+    setErrorMessage(null);
+    setDraftReason(null);
+    setCompleteReport(null);
+    saveAttemptId.current += 1;
+    saveInFlight.current = false;
+    setSaveState('idle');
+    setSaveError(null);
+  }, [storageEpoch]);
 
   const generate = () => {
     if (!canGenerate) {
@@ -127,7 +156,10 @@ export function AiReportPanel({
     setErrorMessage(null);
     setDraftReason(null);
     setCompleteReport(null);
-    setSaved(false);
+    saveAttemptId.current += 1;
+    saveInFlight.current = false;
+    setSaveState('idle');
+    setSaveError(null);
 
     void runGeneration({
       requestId,
@@ -207,12 +239,35 @@ export function AiReportPanel({
     setPhase('draft');
   };
 
-  const saveReport = () => {
-    if (completeReport === null || onSaveReport === undefined) {
+  const saveReport = async () => {
+    if (
+      completeReport === null ||
+      onSaveReport === undefined ||
+      saveInFlight.current ||
+      storageDisabled
+    ) {
       return;
     }
-    onSaveReport(completeReport);
-    setSaved(true);
+    const attemptId = saveAttemptId.current + 1;
+    saveAttemptId.current = attemptId;
+    saveInFlight.current = true;
+    setSaveState('saving');
+    setSaveError(null);
+    try {
+      await onSaveReport(completeReport);
+      if (saveAttemptId.current === attemptId) {
+        setSaveState('saved');
+      }
+    } catch {
+      if (saveAttemptId.current === attemptId) {
+        setSaveState('failed');
+        setSaveError('完整报告未能保存到当前浏览器，请重试。');
+      }
+    } finally {
+      if (saveAttemptId.current === attemptId) {
+        saveInFlight.current = false;
+      }
+    }
   };
 
   if (!active) {
@@ -230,7 +285,7 @@ export function AiReportPanel({
           <p className="panel-kicker">用户主动生成 · 浏览器直连</p>
           <h2 id="ai-report-heading">AI 报告</h2>
         </div>
-        <ReportStatus phase={phase} draftReason={draftReason} saved={saved} />
+        <ReportStatus phase={phase} draftReason={draftReason} saved={saveState === 'saved'} />
       </div>
 
       <DeterministicContext context={displayedContext} />
@@ -246,8 +301,16 @@ export function AiReportPanel({
           </button>
         )}
         {phase === 'complete' && onSaveReport !== undefined ? (
-          <button type="button" disabled={saved} onClick={saveReport}>
-            保存完整报告
+          <button
+            type="button"
+            disabled={saveState === 'saving' || saveState === 'saved' || storageDisabled}
+            onClick={() => void saveReport()}
+          >
+            {saveState === 'saving'
+              ? '正在保存…'
+              : saveState === 'failed'
+                ? '重试保存完整报告'
+                : '保存完整报告'}
           </button>
         ) : null}
       </div>
@@ -260,6 +323,11 @@ export function AiReportPanel({
       {errorMessage === null ? null : (
         <p className="ai-report__error" role="alert">
           {errorMessage}
+        </p>
+      )}
+      {saveError === null ? null : (
+        <p className="ai-report__error" role="alert">
+          {saveError}
         </p>
       )}
       {showReportSections ? (

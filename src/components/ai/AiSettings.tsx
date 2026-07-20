@@ -20,6 +20,7 @@ export interface AiSettingsProps {
   readonly initialValue?: AiProviderSettings;
   readonly onChange?: (settings: AiProviderSettings) => void;
   readonly onSanitizedChange?: (settings: SanitizedAiProviderSettings) => void;
+  readonly disabled?: boolean;
 }
 
 export function AiSettings({
@@ -27,6 +28,7 @@ export function AiSettings({
   initialValue = DEFAULT_AI_PROVIDER_SETTINGS,
   onChange,
   onSanitizedChange,
+  disabled = false,
 }: AiSettingsProps) {
   const [internalValue, setInternalValue] = useState<AiProviderSettings>(initialValue);
   const [touched, setTouched] = useState<ReadonlySet<keyof AiProviderSettings>>(new Set());
@@ -73,6 +75,7 @@ export function AiSettings({
             id="ai-base-url"
             type="url"
             value={settings.baseUrl}
+            disabled={disabled}
             aria-describedby="ai-base-url-description ai-base-url-error"
             aria-invalid={touched.has('baseUrl') && errors.baseUrl !== undefined}
             onChange={updateText('baseUrl')}
@@ -94,6 +97,7 @@ export function AiSettings({
             id="ai-model"
             type="text"
             value={settings.model}
+            disabled={disabled}
             aria-describedby="ai-model-description ai-model-error"
             aria-invalid={touched.has('model') && errors.model !== undefined}
             aria-required="true"
@@ -115,6 +119,7 @@ export function AiSettings({
             type="password"
             autoComplete="off"
             value={settings.apiKey}
+            disabled={disabled}
             aria-describedby="ai-api-key-description ai-api-key-error"
             aria-invalid={touched.has('apiKey') && errors.apiKey !== undefined}
             aria-required="true"
@@ -137,6 +142,7 @@ export function AiSettings({
           id="ai-remember-key"
           type="checkbox"
           checked={settings.rememberApiKey}
+          disabled={disabled}
           aria-describedby="ai-remember-key-description"
           onChange={(event) => update({ ...settings, rememberApiKey: event.currentTarget.checked })}
         />
@@ -156,7 +162,7 @@ export function AiSettings({
       <button
         type="button"
         className="ai-settings__clear"
-        disabled={settings.apiKey.length === 0 && !settings.rememberApiKey}
+        disabled={disabled || (settings.apiKey.length === 0 && !settings.rememberApiKey)}
         onClick={() => update({ ...settings, apiKey: '', rememberApiKey: false })}
       >
         清除凭据
