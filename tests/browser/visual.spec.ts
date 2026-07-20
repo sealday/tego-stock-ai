@@ -1,13 +1,14 @@
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 
-import { installFixtureRoutes, waitForFixtureWorkspace } from './fixtures';
+import { test, waitForFixtureWorkspace } from './fixtures';
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, installFixtureRoutes }) => {
   await page.clock.setFixedTime(new Date('2026-07-20T08:00:00+08:00'));
-  await installFixtureRoutes(page);
+  await installFixtureRoutes();
   await page.goto('/');
   await waitForFixtureWorkspace(page);
   await page.addStyleTag({
+    // These platform-owned fonts avoid downloads and are stable on the enforced darwin-arm64 runner.
     content: `
       :root {
         --font-sans: Arial, sans-serif;

@@ -1,19 +1,20 @@
 import { readFile } from 'node:fs/promises';
 
-import { expect, test } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 import {
   FIXTURE_AI_KEY,
   FIXTURE_AI_MODEL,
   configureFixtureAi,
-  installFixtureRoutes,
+  test,
   waitForFixtureWorkspace,
 } from './fixtures';
 
 test('keeps credentials, reports, watchlist, export and deletion local to this browser', async ({
   page,
+  installFixtureRoutes,
 }) => {
-  const probe = await installFixtureRoutes(page);
+  const probe = await installFixtureRoutes();
   await page.goto('/');
   await waitForFixtureWorkspace(page);
 
@@ -22,9 +23,10 @@ test('keeps credentials, reports, watchlist, export and deletion local to this b
   await addWatchlist.click();
   await expect(page.getByText(/贵州茅台已保存到当前浏览器的本地自选股/).first()).toBeVisible();
 
-  await configureFixtureAi(page, true);
+  await configureFixtureAi(page, probe, true);
   await page.getByRole('button', { name: '生成 AI 报告' }).click();
   await expect(page.getByText('报告已完成', { exact: true })).toBeVisible();
+  await assertKeyAbsentFromRenderedDocument(page);
   await page.getByRole('button', { name: '保存完整报告' }).click();
   await expect(page.locator('.saved-reports__count')).toHaveText('1 份');
 
@@ -39,6 +41,7 @@ test('keeps credentials, reports, watchlist, export and deletion local to this b
   expect(exported).toContain(FIXTURE_AI_MODEL);
   expect(exported).toContain('600519.SH');
   expect(exported).toContain('"status": "complete"');
+  await assertKeyAbsentFromRenderedDocument(page);
 
   await page.getByRole('button', { name: '清除 AI 凭据' }).click();
   await expect(page.getByText(/AI 凭据已清除/)).toBeVisible();
@@ -67,10 +70,20 @@ test('keeps credentials, reports, watchlist, export and deletion local to this b
   await expect(page.locator('.saved-reports__count')).toHaveText('0 份');
   await expect(page.getByText('尚未保存本地 AI 报告。')).toBeVisible();
 
-  expect(await page.locator('body').innerText()).not.toContain(FIXTURE_AI_KEY);
-  expect(await page.content()).not.toContain(FIXTURE_AI_KEY);
+  await assertKeyAbsentFromRenderedDocument(page);
   expect(probe.apiRequestsWithAuthorization()).toEqual([]);
   expect(probe.consoleMessages.join('\n')).not.toContain(FIXTURE_AI_KEY);
   expect(probe.consoleErrors).toEqual([]);
   expect(probe.pageErrors).toEqual([]);
 });
+
+async function assertKeyAbsentFromRenderedDocument(page: Page) {
+  expect(await page.locator('body').innerText()).not.toContain(FIXTURE_AI_KEY);
+  const html = await page.content();
+  const passwordMarkup = await page
+    .getByLabel('API key', { exact: true })
+    .evaluate((input) => input.outerHTML);
+  expect(html.replace(passwordMarkup, '<input id="ai-api-key" type="password">')).not.toContain(
+    FIXTURE_AI_KEY,
+  );
+}

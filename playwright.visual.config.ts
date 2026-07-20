@@ -2,6 +2,15 @@ import { defineConfig } from '@playwright/test';
 
 delete process.env.NO_COLOR;
 
+const visualReferencePlatform = 'darwin-arm64';
+const currentPlatform = `${process.platform}-${process.arch}`;
+if (currentPlatform !== visualReferencePlatform) {
+  throw new Error(
+    `Visual baselines require ${visualReferencePlatform}; received ${currentPlatform}. ` +
+      'Run browser smoke tests here and move visual comparison to the configured baseline runner.',
+  );
+}
+
 export default defineConfig({
   testDir: './tests/browser',
   testMatch: 'visual.spec.ts',
@@ -13,7 +22,7 @@ export default defineConfig({
   outputDir: 'test-results/visual',
   snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{projectName}/{arg}{ext}',
   metadata: {
-    visualReferencePlatform: 'darwin-arm64 / Playwright 1.61.1 bundled Chromium',
+    visualReferencePlatform: `${visualReferencePlatform} / Playwright 1.61.1 bundled Chromium`,
   },
   expect: {
     toHaveScreenshot: {

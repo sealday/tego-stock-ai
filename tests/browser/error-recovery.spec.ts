@@ -1,17 +1,20 @@
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
 
 import {
   FIXTURE_AI_KEY,
   MISSING_PE_REASON,
   MISSING_REVENUE_REASON,
   configureFixtureAi,
-  installFixtureRoutes,
+  test,
   waitForFixtureWorkspace,
   type FixtureProbe,
 } from './fixtures';
 
-test('keeps deterministic research usable without AI configuration', async ({ page }) => {
-  const probe = await installFixtureRoutes(page);
+test('keeps deterministic research usable without AI configuration', async ({
+  page,
+  installFixtureRoutes,
+}) => {
+  const probe = await installFixtureRoutes();
   await page.goto('/');
   await waitForFixtureWorkspace(page);
 
@@ -25,8 +28,9 @@ test('keeps deterministic research usable without AI configuration', async ({ pa
 
 test('discloses stale cached data while keeping every deterministic view available', async ({
   page,
+  installFixtureRoutes,
 }) => {
-  const probe = await installFixtureRoutes(page, { market: 'stale' });
+  const probe = await installFixtureRoutes({ market: 'stale' });
   await page.goto('/');
   await waitForFixtureWorkspace(page);
 
@@ -41,8 +45,9 @@ test('discloses stale cached data while keeping every deterministic view availab
 
 test('shows field-level reasons instead of fabricating missing financial metrics', async ({
   page,
+  installFixtureRoutes,
 }) => {
-  const probe = await installFixtureRoutes(page, { market: 'missing-financials' });
+  const probe = await installFixtureRoutes({ market: 'missing-financials' });
   await page.goto('/');
   await waitForFixtureWorkspace(page);
 
@@ -53,11 +58,14 @@ test('shows field-level reasons instead of fabricating missing financial metrics
   assertCleanBrowser(probe);
 });
 
-test('retries only the AI request after an invalid provider response', async ({ page }) => {
-  const probe = await installFixtureRoutes(page, { ai: 'retry-once' });
+test('retries only the AI request after an invalid provider response', async ({
+  page,
+  installFixtureRoutes,
+}) => {
+  const probe = await installFixtureRoutes({ ai: 'retry-once' });
   await page.goto('/');
   await waitForFixtureWorkspace(page);
-  await configureFixtureAi(page);
+  await configureFixtureAi(page, probe);
 
   await page.getByRole('button', { name: '生成 AI 报告' }).click();
   await expect(page.getByText('AI 生成失败', { exact: true })).toBeVisible();
@@ -72,11 +80,12 @@ test('retries only the AI request after an invalid provider response', async ({ 
 
 test('persists an explicitly incomplete draft after an interrupted provider stream', async ({
   page,
+  installFixtureRoutes,
 }) => {
-  const probe = await installFixtureRoutes(page, { ai: 'interrupted' });
+  const probe = await installFixtureRoutes({ ai: 'interrupted' });
   await page.goto('/');
   await waitForFixtureWorkspace(page);
-  await configureFixtureAi(page);
+  await configureFixtureAi(page, probe);
 
   await page.getByRole('button', { name: '生成 AI 报告' }).click();
   await expect(page.getByText('未完成草稿 · 流式响应中断')).toBeVisible();
