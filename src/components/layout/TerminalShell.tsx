@@ -137,7 +137,7 @@ function Watchlist({ stocks }: { readonly stocks: readonly StockSearchResult[] }
     <section className="terminal-watchlist" aria-label="本地自选股">
       <h2>本地自选股</h2>
       {stocks.length === 0 ? (
-        <p>Task 7 将提供本地保存的自选列表。</p>
+        <p>尚未添加本地自选股。</p>
       ) : (
         <ul>
           {stocks.map((stock) => (

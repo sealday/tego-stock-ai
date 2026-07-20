@@ -37,6 +37,7 @@ const approvedDevDependencies = {
   '@vercel/node': '5.8.26',
   '@vitejs/plugin-react': '6.0.3',
   '@vitest/coverage-v8': '4.1.10',
+  'fake-indexeddb': '6.2.5',
   husky: '9.1.7',
   jsdom: '29.1.1',
   oxfmt: '0.59.0',

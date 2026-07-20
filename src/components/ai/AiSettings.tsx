@@ -138,7 +138,8 @@ export function AiSettings({
         <span>在此设备上记住 API key</span>
       </label>
       <p id="ai-remember-key-description" className="ai-settings__privacy-note">
-        只有勾选后才表示持久化同意；当前版本仍只保存在内存中。浏览器扩展或受损页面可能读取浏览器中的凭据。
+        未勾选时 key 仅保留在当前页面会话；只有勾选后才表示同意将 key
+        保存在当前浏览器。浏览器扩展或受损页面可能读取浏览器中的凭据。
       </p>
 
       {customEndpoint ? (
