@@ -813,6 +813,22 @@ describe('deployment evidence gates', () => {
     }
   });
 
+  it('keeps legal underscore job IDs outside the preceding job block', () => {
+    const jobs = workflowJobs(`
+jobs:
+  quality:
+    steps:
+      - run: npm run lint
+  build_extra:
+    steps:
+      - run: npm run build
+`);
+
+    expect([...jobs.keys()]).toEqual(['quality', 'build_extra']);
+    expect(requiredJob(jobs, 'quality')).not.toContain('npm run build');
+    expect(requiredJob(jobs, 'build_extra')).toContain('npm run build');
+  });
+
   it.each(['${{ secrets.NAME }}', "${{ secrets['NAME'] }}", '${{ SeCrEtS [ "NAME" ] }}'])(
     'detects forbidden CI secret reference syntax: %s',
     (source) => {
