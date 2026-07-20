@@ -11,6 +11,8 @@
     "test:unit": "vitest run --project unit --project component --project contract",
     "test:browser": "playwright test",
     "test:visual": "playwright test --config=playwright.visual.config.ts",
+    "smoke:deployment": "node scripts/deployment-smoke.mjs",
+    "ci": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run test:browser && npm run test:visual",
     "typecheck": "tsc -b --pretty false",
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --fix .",
