@@ -1,8 +1,10 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 const CHECKS = ['health', 'api-error', 'api-cache', 'spa-fallback', 'cron-protection'];
 const EXPLICIT_BASE_URL_ERROR = 'An explicit HTTP(S) deployment base URL is required.';
+const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * @typedef {(input: string | URL | Request, init?: RequestInit) => Promise<Response>} SmokeFetch
@@ -24,6 +26,9 @@ export async function runDeploymentSmoke(options) {
   if (!isObject(healthBody) || !isObject(healthBody.data) || healthBody.data.status !== 'ok') {
     fail('health endpoint returned an invalid payload');
   }
+  if (healthBody.data.providerConfigured !== true) {
+    fail('health endpoint reports provider is not configured');
+  }
 
   const apiError = await request(fetchResponse, baseUrl, '/api/stocks/search?q=');
   requireStatus(apiError, 400, 'invalid API request did not return HTTP 400');
@@ -34,19 +39,28 @@ export async function runDeploymentSmoke(options) {
     fail('invalid API request returned an unexpected error shape');
   }
 
-  const cachedApi = await request(fetchResponse, baseUrl, '/api/stocks/search?q=600519');
+  const cachedApi = await request(
+    fetchResponse,
+    baseUrl,
+    `/api/stocks/search?q=600519&deployment-smoke=${randomUUID()}`,
+    { headers: { pragma: 'no-cache' } },
+  );
   requireStatus(cachedApi, 200, 'cache probe did not return HTTP 200');
   requireJsonContentType(cachedApi, 'cache probe did not return JSON');
   const cacheControl = cachedApi.headers.get('cache-control') ?? '';
-  if (
-    !/(?:^|,)\s*public(?:\s*,|$)/i.test(cacheControl) ||
-    !/\bs-maxage=\d+\b/i.test(cacheControl)
-  ) {
-    fail('cache probe did not return a shared public cache policy');
+  if (!hasSafePositivePublicCachePolicy(cacheControl)) {
+    fail('cache probe did not return a safe positive public cache policy');
+  }
+  const vercelCache = cachedApi.headers.get('x-vercel-cache')?.trim().toUpperCase();
+  if (vercelCache !== 'MISS' && vercelCache !== 'REVALIDATED') {
+    fail('cache probe did not confirm the current Vercel deployment');
   }
   const cachedApiBody = await parseJson(cachedApi, 'cache probe returned invalid JSON');
-  if (!isObject(cachedApiBody) || !Array.isArray(cachedApiBody.data)) {
-    fail('cache probe returned an invalid API payload');
+  if (!hasMarketEnvelopeMetadata(cachedApiBody)) {
+    fail('cache probe returned invalid market envelope metadata');
+  }
+  if (!cachedApiBody.data.some((stock) => isObject(stock) && stock.code === '600519.SH')) {
+    fail('cache probe did not include 600519.SH');
   }
 
   const spa = await request(fetchResponse, baseUrl, '/deployment-smoke/spa-fallback');
@@ -93,13 +107,91 @@ function parseBaseUrl(value) {
   }
 }
 
-/** @param {SmokeFetch} fetchResponse @param {URL} baseUrl @param {string} path */
-async function request(fetchResponse, baseUrl, path) {
+/**
+ * @param {SmokeFetch} fetchResponse
+ * @param {URL} baseUrl
+ * @param {string} path
+ * @param {RequestInit} [init]
+ */
+async function request(fetchResponse, baseUrl, path, init = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  timeout.unref();
   try {
-    return await fetchResponse(new URL(path, baseUrl));
+    const response = await fetchResponse(new URL(path, baseUrl), {
+      ...init,
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    const body = await response.arrayBuffer();
+    return new Response(body, {
+      headers: response.headers,
+      status: response.status,
+      statusText: response.statusText,
+    });
   } catch {
     fail('a deployment request could not be completed');
+  } finally {
+    clearTimeout(timeout);
   }
+}
+
+/** @param {string} value */
+function hasSafePositivePublicCachePolicy(value) {
+  const directives = new Map();
+  for (const segment of value.split(',')) {
+    const [rawName, ...rawValue] = segment.trim().split('=');
+    const name = rawName?.trim().toLowerCase();
+    if (!name || directives.has(name)) {
+      return false;
+    }
+    directives.set(name, rawValue.length === 0 ? undefined : rawValue.join('=').trim());
+  }
+
+  if (
+    !directives.has('public') ||
+    directives.has('private') ||
+    directives.has('no-store') ||
+    directives.has('no-cache')
+  ) {
+    return false;
+  }
+
+  const maxAge = directives.get('max-age');
+  return (
+    typeof maxAge === 'string' &&
+    /^\d+$/.test(maxAge) &&
+    Number.isSafeInteger(Number(maxAge)) &&
+    Number(maxAge) > 0
+  );
+}
+
+/** @param {unknown} value */
+function hasMarketEnvelopeMetadata(value) {
+  return (
+    isObject(value) &&
+    Array.isArray(value.data) &&
+    isIsoDate(value.asOf) &&
+    value.source === 'Tushare Pro' &&
+    (value.freshness === 'fresh' || value.freshness === 'stale') &&
+    isObject(value.availability) &&
+    Array.isArray(value.limitations) &&
+    value.limitations.every((limitation) => typeof limitation === 'string')
+  );
+}
+
+/** @param {unknown} value */
+function isIsoDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
+  );
 }
 
 /** @param {Response} response @param {number} expected @param {string} message */

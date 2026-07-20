@@ -134,5 +134,7 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: playwright-visual-report
-          path: playwright-report/visual/
+          path: |
+            playwright-report/visual/
+            test-results/visual/
           if-no-files-found: ignore

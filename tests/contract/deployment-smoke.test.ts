@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
+
+import { describe, expect, it, vi } from 'vitest';
 
 type SmokeFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -10,7 +14,16 @@ interface DeploymentSmokeModule {
   }): Promise<{ checks: readonly string[] }>;
 }
 
+interface RecordedRequest {
+  headers: Headers;
+  method: string;
+  redirect: RequestRedirect;
+  signal: AbortSignal;
+  url: URL;
+}
+
 const moduleUrl = new URL('../../scripts/deployment-smoke.mjs', import.meta.url).href;
+const scriptPath = fileURLToPath(new URL('../../scripts/deployment-smoke.mjs', import.meta.url));
 
 async function loadDeploymentSmoke(): Promise<DeploymentSmokeModule> {
   const loaded: unknown = await import(moduleUrl);
@@ -77,7 +90,8 @@ function successfulRoutes(): Map<string, Response> {
         {
           status: 200,
           headers: {
-            'cache-control': 'public, max-age=300, s-maxage=86400, stale-while-revalidate=604800',
+            'cache-control': 'public, max-age=300, stale-while-revalidate=604800',
+            'x-vercel-cache': 'MISS',
           },
         },
       ),
@@ -106,15 +120,19 @@ function successfulRoutes(): Map<string, Response> {
   ]);
 }
 
-function createRouteFetch(
-  routes: Map<string, Response>,
-  requests: Array<{ url: URL; init: RequestInit }>,
-): SmokeFetch {
+function createRouteFetch(routes: Map<string, Response>, requests: RecordedRequest[]): SmokeFetch {
   return async (input, init = {}) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    requests.push({ url, init });
-    const response = routes.get(`${request.method} ${url.pathname}${url.search}`);
+    requests.push({
+      headers: new Headers(request.headers),
+      method: request.method,
+      redirect: request.redirect,
+      signal: request.signal,
+      url,
+    });
+    const key = routeKey(request.method, url);
+    const response = routes.get(key);
 
     if (response === undefined) {
       throw new Error(`Unexpected deployment-smoke request: ${request.method} ${url.pathname}`);
@@ -124,10 +142,77 @@ function createRouteFetch(
   };
 }
 
+function routeKey(method: string, url: URL): string {
+  return url.pathname === '/api/stocks/search' && url.searchParams.get('q') === '600519'
+    ? `${method} ${url.pathname}?q=600519`
+    : `${method} ${url.pathname}${url.search}`;
+}
+
+async function withDeploymentServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
+  const routes = successfulRoutes();
+  const server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      const fixture = routes.get(routeKey(request.method ?? 'GET', url));
+      if (fixture === undefined) {
+        response.writeHead(404, { 'content-type': 'text/plain' });
+        response.end('fixture missing');
+        return;
+      }
+
+      response.statusCode = fixture.status;
+      fixture.headers.forEach((value, name) => response.setHeader(name, value));
+      response.end(Buffer.from(await fixture.arrayBuffer()));
+    } catch {
+      response.writeHead(500, { 'content-type': 'text/plain' });
+      response.end('fixture failed');
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new TypeError('Deployment smoke fixture did not bind a TCP port.');
+  }
+
+  try {
+    await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.closeAllConnections();
+      server.close((error) => (error === undefined ? resolve() : reject(error)));
+    });
+  }
+}
+
+function runCli(arguments_: readonly string[], sentinel: string) {
+  return new Promise<{ code: number | null; stderr: string; stdout: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, ...arguments_], {
+      env: { ...process.env, DEPLOYMENT_SMOKE_SENTINEL: sentinel },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, stderr, stdout }));
+  });
+}
+
 describe('deployment smoke', () => {
   it('validates health, API contracts and caches, SPA fallback, and unauthenticated Cron', async () => {
     const { runDeploymentSmoke } = await loadDeploymentSmoke();
-    const requests: Array<{ url: URL; init: RequestInit }> = [];
+    const requests: RecordedRequest[] = [];
 
     const result = await runDeploymentSmoke({
       baseUrl: 'https://stocks.example.com/',
@@ -141,15 +226,171 @@ describe('deployment smoke', () => {
       'spa-fallback',
       'cron-protection',
     ]);
-    expect(requests.map(({ url }) => `${url.pathname}${url.search}`)).toEqual([
+    expect(requests.map(({ url }) => url.pathname)).toEqual([
       '/api/health',
-      '/api/stocks/search?q=',
-      '/api/stocks/search?q=600519',
+      '/api/stocks/search',
+      '/api/stocks/search',
       '/deployment-smoke/spa-fallback',
       '/api/cron/daily-close',
     ]);
+    expect(requests.every(({ redirect }) => redirect === 'error')).toBe(true);
+    const stockProbe = requests[2];
+    expect(stockProbe?.url.searchParams.get('q')).toBe('600519');
+    expect(stockProbe?.url.searchParams.get('deployment-smoke')).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stockProbe?.headers.get('pragma')).toBe('no-cache');
     const cronRequest = requests.at(-1);
-    expect(cronRequest?.init.headers).toBeUndefined();
+    expect(cronRequest?.headers.get('authorization')).toBeNull();
+  });
+
+  it('requires a configured provider and complete current-deployment stock envelope', async () => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const routes = successfulRoutes();
+    routes.set(
+      'GET /api/health',
+      jsonResponse(
+        {
+          data: { status: 'ok', providerConfigured: false },
+          asOf: '2026-07-20',
+          source: 'Tushare Pro',
+          freshness: 'fresh',
+          availability: {},
+          limitations: [],
+        },
+        { status: 200, headers: { 'cache-control': 'no-store' } },
+      ),
+    );
+
+    await expect(
+      runDeploymentSmoke({
+        baseUrl: 'https://stocks.example.com',
+        fetch: createRouteFetch(routes, []),
+      }),
+    ).rejects.toThrow(
+      'Deployment smoke failed: health endpoint reports provider is not configured.',
+    );
+  });
+
+  it.each([
+    [
+      'private',
+      'private, max-age=300',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'no-store',
+      'public, no-store, max-age=300',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'no-cache',
+      'public, no-cache, max-age=300',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'zero max-age',
+      'public, max-age=0',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'invalid max-age',
+      'public, max-age=invalid',
+      'MISS',
+      'cache probe did not return a safe positive public cache policy',
+    ],
+    [
+      'missing Vercel status',
+      'public, max-age=300',
+      null,
+      'cache probe did not confirm the current Vercel deployment',
+    ],
+    [
+      'stale Vercel hit',
+      'public, max-age=300',
+      'HIT',
+      'cache probe did not confirm the current Vercel deployment',
+    ],
+  ])(
+    'rejects a non-current or unsafe wire cache policy: %s',
+    async (_case, cacheControl, status, expectedFailure) => {
+      const { runDeploymentSmoke } = await loadDeploymentSmoke();
+      const routes = successfulRoutes();
+      const headers = new Headers({ 'cache-control': cacheControl });
+      if (status !== null) {
+        headers.set('x-vercel-cache', status);
+      }
+      routes.set(
+        'GET /api/stocks/search?q=600519',
+        jsonResponse(
+          {
+            data: [{ code: '600519.SH' }],
+            asOf: '2026-07-18',
+            source: 'Tushare Pro',
+            freshness: 'fresh',
+            availability: {},
+            limitations: [],
+          },
+          { status: 200, headers },
+        ),
+      );
+
+      await expect(
+        runDeploymentSmoke({
+          baseUrl: 'https://stocks.example.com',
+          fetch: createRouteFetch(routes, []),
+        }),
+      ).rejects.toThrow(`Deployment smoke failed: ${expectedFailure}.`);
+    },
+  );
+
+  it.each([
+    [
+      'metadata',
+      {
+        data: [{ code: '600519.SH' }],
+        asOf: 'not-a-date',
+        source: 'unexpected',
+        freshness: 'fresh',
+        availability: {},
+        limitations: [],
+      },
+      'cache probe returned invalid market envelope metadata',
+    ],
+    [
+      'target stock',
+      {
+        data: [{ code: '000001.SZ' }],
+        asOf: '2026-07-18',
+        source: 'Tushare Pro',
+        freshness: 'fresh',
+        availability: {},
+        limitations: [],
+      },
+      'cache probe did not include 600519.SH',
+    ],
+  ])('rejects incomplete current-deployment %s evidence', async (_case, body, expectedFailure) => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const routes = successfulRoutes();
+    routes.set(
+      'GET /api/stocks/search?q=600519',
+      jsonResponse(body, {
+        status: 200,
+        headers: {
+          'cache-control': 'public, max-age=300',
+          'x-vercel-cache': 'REVALIDATED',
+        },
+      }),
+    );
+
+    await expect(
+      runDeploymentSmoke({
+        baseUrl: 'https://stocks.example.com',
+        fetch: createRouteFetch(routes, []),
+      }),
+    ).rejects.toThrow(`Deployment smoke failed: ${expectedFailure}.`);
   });
 
   it.each(['', 'stocks.example.com', 'file:///tmp/tego'])(
@@ -179,11 +420,6 @@ describe('deployment smoke', () => {
       new Response('{}', { status: 200, headers: { 'content-type': 'text/plain' } }),
     ],
     [
-      'API error shape',
-      'GET /api/stocks/search?q=',
-      jsonResponse({ error: { message: 'unsafe response' } }, { status: 400 }),
-    ],
-    [
       'API cache policy',
       'GET /api/stocks/search?q=600519',
       jsonResponse({ data: [] }, { status: 200, headers: { 'cache-control': 'no-store' } }),
@@ -192,11 +428,6 @@ describe('deployment smoke', () => {
       'SPA fallback',
       'GET /deployment-smoke/spa-fallback',
       new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } }),
-    ],
-    [
-      'Cron protection',
-      'GET /api/cron/daily-close',
-      jsonResponse({ error: { code: 'INVALID_INPUT' } }, { status: 200 }),
     ],
   ])('fails closed when the %s contract drifts', async (_case, route, invalidResponse) => {
     const { runDeploymentSmoke } = await loadDeploymentSmoke();
@@ -209,6 +440,151 @@ describe('deployment smoke', () => {
         fetch: createRouteFetch(routes, []),
       }),
     ).rejects.toThrow(/^Deployment smoke failed: /);
+  });
+
+  it('isolates typed API error-shape drift after status and cache validation', async () => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const routes = successfulRoutes();
+    routes.set(
+      'GET /api/stocks/search?q=',
+      jsonResponse(
+        { error: { code: 'INVALID_INPUT', message: 'safe but incomplete' } },
+        { status: 400, headers: { 'cache-control': 'no-store' } },
+      ),
+    );
+
+    await expect(
+      runDeploymentSmoke({
+        baseUrl: 'https://stocks.example.com',
+        fetch: createRouteFetch(routes, []),
+      }),
+    ).rejects.toThrow(
+      'Deployment smoke failed: invalid API request returned an unexpected error shape.',
+    );
+  });
+
+  it('isolates typed Cron error-shape drift after status and cache validation', async () => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const routes = successfulRoutes();
+    routes.set(
+      'GET /api/cron/daily-close',
+      jsonResponse(
+        { error: { code: 'INVALID_INPUT', message: 'safe but incomplete' } },
+        { status: 401, headers: { 'cache-control': 'no-store' } },
+      ),
+    );
+
+    await expect(
+      runDeploymentSmoke({
+        baseUrl: 'https://stocks.example.com',
+        fetch: createRouteFetch(routes, []),
+      }),
+    ).rejects.toThrow(
+      'Deployment smoke failed: unauthenticated Cron request returned an unexpected error shape.',
+    );
+  });
+
+  it('turns redirect failures into generic errors without leaking the URL or response', async () => {
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    const sensitiveUrl = 'https://current-deployment.example.com/private-value';
+    const sensitivePayload = 'redirected-sensitive-response';
+    let redirect: RequestRedirect | undefined;
+
+    let failure = '';
+    try {
+      await runDeploymentSmoke({
+        baseUrl: sensitiveUrl,
+        fetch: async (_input, init) => {
+          redirect = init?.redirect;
+          throw new TypeError(`redirected to ${sensitiveUrl}: ${sensitivePayload}`);
+        },
+      });
+    } catch (caught) {
+      failure = String(caught);
+    }
+
+    expect(redirect).toBe('error');
+    expect(failure).toBe(
+      'Error: Deployment smoke failed: a deployment request could not be completed.',
+    );
+    expect(failure).not.toContain(sensitiveUrl);
+    expect(failure).not.toContain(sensitivePayload);
+  });
+
+  it('aborts a stalled request after the fixed timeout with a generic error', async () => {
+    vi.useFakeTimers();
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    let signal: AbortSignal | undefined;
+    const execution = runDeploymentSmoke({
+      baseUrl: 'https://timeout-value.example.com',
+      fetch: async (_input, init) => {
+        signal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal?.reason), { once: true });
+        });
+      },
+    });
+    const outcome = execution.then(
+      () => ({ error: undefined }),
+      (error: unknown) => ({ error }),
+    );
+
+    try {
+      await Promise.resolve();
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(String((await outcome).error)).toBe(
+        'Error: Deployment smoke failed: a deployment request could not be completed.',
+      );
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the fixed timeout active while reading a stalled response body', async () => {
+    vi.useFakeTimers();
+    const { runDeploymentSmoke } = await loadDeploymentSmoke();
+    let signal: AbortSignal | undefined;
+    const execution = runDeploymentSmoke({
+      baseUrl: 'https://slow-body.example.com',
+      fetch: async (_input, init) => {
+        signal = init?.signal ?? undefined;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              signal?.addEventListener('abort', () => controller.error(signal?.reason), {
+                once: true,
+              });
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'cache-control': 'no-store',
+              'content-type': 'application/json',
+            },
+          },
+        );
+      },
+    });
+    const outcome = execution.then(
+      () => ({ error: undefined }),
+      (error: unknown) => ({ error }),
+    );
+
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(signal?.aborted).toBe(true);
+      expect(String((await outcome).error)).toBe(
+        'Error: Deployment smoke failed: a deployment request could not be completed.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not include the base URL or response payloads in errors', async () => {
@@ -240,6 +616,49 @@ describe('deployment smoke', () => {
   });
 });
 
+describe('deployment smoke CLI', () => {
+  it('reports only a generic success summary from a real child process', async () => {
+    const sentinel = 'environment-secret-child-value';
+
+    await withDeploymentServer(async (baseUrl) => {
+      const result = await runCli([baseUrl], sentinel);
+
+      expect(result).toEqual({
+        code: 0,
+        stderr: '',
+        stdout: 'Deployment smoke passed 5 checks.\n',
+      });
+      expect(`${result.stdout}${result.stderr}`).not.toContain(baseUrl);
+      expect(`${result.stdout}${result.stderr}`).not.toContain(sentinel);
+    });
+  });
+
+  it.each([
+    ['missing URL', [], 'environment-secret-missing'],
+    [
+      'sensitive URL argument',
+      ['https://environment-user:argv-secret-value@stocks.example.com/private'],
+      'environment-secret-invalid',
+    ],
+  ])(
+    'fails safely for %s without echoing arguments or environment',
+    async (_case, args, sentinel) => {
+      const result = await runCli(args, sentinel);
+
+      expect(result).toEqual({
+        code: 1,
+        stderr: 'An explicit HTTP(S) deployment base URL is required.\n',
+        stdout: '',
+      });
+      expect(`${result.stdout}${result.stderr}`).not.toContain(sentinel);
+      for (const argument of args) {
+        expect(`${result.stdout}${result.stderr}`).not.toContain(argument);
+        expect(`${result.stdout}${result.stderr}`).not.toContain('argv-secret-value');
+      }
+    },
+  );
+});
+
 describe('deployment evidence gates', () => {
   it('provides an explicit deployment-smoke command and complete local CI aggregate', async () => {
     const packageJson: unknown = JSON.parse(
@@ -250,27 +669,58 @@ describe('deployment evidence gates', () => {
     }
 
     expect(packageJson.scripts['smoke:deployment']).toBe('node scripts/deployment-smoke.mjs');
-    expect(packageJson.scripts.ci).toBe(
-      'npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run test:browser && npm run test:visual',
+    expect(packageJson.scripts['ci:portable']).toBe(
+      'npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run test:browser',
     );
+    expect(packageJson.scripts.ci).toBe('npm run ci:portable && npm run test:visual');
   });
 
-  it('keeps CI least-privilege and runs visual evidence on macOS 26 arm64', async () => {
+  it('locks each least-privilege CI job to its own evidence gates', async () => {
     const workflow = await readFile(
       new URL('../../.github/workflows/ci.yml', import.meta.url),
       'utf8',
     );
+    const introduced = workflowJob(workflow, 'introduced-commit-policy');
+    const quality = workflowJob(workflow, 'quality');
+    const vitest = workflowJob(workflow, 'vitest');
+    const browser = workflowJob(workflow, 'playwright');
+    const visual = workflowJob(workflow, 'visual');
 
     expect(workflow).toMatch(/permissions:\s*\n\s+contents: read/);
     expect(workflow).toMatch(/concurrency:[\s\S]*?cancel-in-progress: true/);
-    expect(workflow).toContain('node-version: 24');
-    expect(workflow).toContain('npm ci');
-    expect(workflow).toContain('npx playwright install --with-deps chromium');
-    expect(workflow).toMatch(/visual:[\s\S]*?runs-on: macos-26/);
-    expect(workflow).toMatch(/visual:[\s\S]*?npx playwright install chromium/);
-    expect(workflow).toMatch(/visual:[\s\S]*?npm run test:visual/);
-    expect(workflow).toMatch(/Upload visual report on failure\s*\n\s+if: failure\(\)/);
+    expect(workflow).toContain('pull_request:');
+    expect(workflow).not.toContain('pull_request_target:');
     expect(workflow).not.toMatch(/\bsecrets\./);
+    expect(workflow).not.toMatch(/^\s+environment:/m);
+    expect(workflow.match(/^[ \t]*permissions:/gm)).toEqual(['permissions:']);
+
+    for (const job of [introduced, quality, vitest, browser, visual]) {
+      expect(job).toContain('actions/checkout@');
+      expect(job).toContain('actions/setup-node@');
+      expect(job).toContain('node-version: 24');
+      expect(job).toContain('run: npm ci');
+      expect(job).not.toContain('permissions:');
+      expect(job).not.toContain('environment:');
+      expect(job).not.toMatch(/\bsecrets\./);
+    }
+
+    expect(introduced).toContain('fetch-depth: 0');
+    expect(introduced).toContain('node scripts/resolve-commit-range.mjs');
+    expect(introduced).toContain('commitlint --from');
+    expect(quality).toContain('npm run format:check');
+    expect(quality).toContain('npm run lint');
+    expect(quality).toContain('npm run typecheck');
+    expect(quality).toContain('npm run build');
+    expect(vitest).toContain('npm run test:unit');
+    expect(browser).toContain('npx playwright install --with-deps chromium');
+    expect(browser).toContain('npm run test:browser');
+    expect(browser).toMatch(/Upload Playwright report on failure\s*\n\s+if: failure\(\)/);
+    expect(visual).toContain('runs-on: macos-26');
+    expect(visual).toContain('npx playwright install chromium');
+    expect(visual).toContain('npm run test:visual');
+    expect(visual).toMatch(/Upload visual report on failure\s*\n\s+if: failure\(\)/);
+    expect(visual).toContain('playwright-report/visual/');
+    expect(visual).toContain('test-results/visual/');
 
     const actions = [...workflow.matchAll(/^\s*uses:\s*(\S+)\s*$/gm)].map((match) => match[1]);
     expect(actions.length).toBeGreaterThan(0);
@@ -279,6 +729,17 @@ describe('deployment evidence gates', () => {
     }
   });
 });
+
+function workflowJob(workflow: string, name: string): string {
+  const marker = `  ${name}:\n`;
+  const start = workflow.indexOf(marker);
+  if (start < 0) {
+    throw new Error(`CI workflow is missing job ${name}.`);
+  }
+  const remainder = workflow.slice(start + marker.length);
+  const next = remainder.search(/^  [a-z][a-z0-9-]*:\n/m);
+  return next < 0 ? workflow.slice(start) : workflow.slice(start, start + marker.length + next);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
