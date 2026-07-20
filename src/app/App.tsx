@@ -2,8 +2,8 @@ import { useState } from 'react';
 
 import { TerminalShell } from '../components/layout/TerminalShell';
 import { StockWorkspace } from '../components/workspace/StockWorkspace';
-import { isoDate, stockCode, type StockSearchResult } from '../domain/stock';
-import { useStockWorkspace } from '../hooks/use-stock-workspace';
+import { stockCode, type StockSearchResult } from '../domain/stock';
+import { toShanghaiIsoDate, useStockWorkspace } from '../hooks/use-stock-workspace';
 
 const DEFAULT_STOCK: StockSearchResult = {
   code: stockCode('600519.SH'),
@@ -13,7 +13,7 @@ const DEFAULT_STOCK: StockSearchResult = {
 
 export function App() {
   const [selectedStock, setSelectedStock] = useState<StockSearchResult>(DEFAULT_STOCK);
-  const asOf = isoDate(new Date().toISOString().slice(0, 10));
+  const asOf = toShanghaiIsoDate(new Date());
   const workspace = useStockWorkspace({ code: selectedStock.code, asOf });
 
   return (

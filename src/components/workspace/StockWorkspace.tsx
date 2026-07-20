@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState, type KeyboardEvent } from 'react';
 
 import { WORKSPACE_TABS, type WorkspaceTabId } from '../../app/routes';
 import { formatShanghaiTimestamp, type StockWorkspaceState } from '../../hooks/use-stock-workspace';
@@ -10,6 +10,7 @@ import { TechnicalPanel } from './TechnicalPanel';
 
 export function StockWorkspace({ state }: { readonly state: StockWorkspaceState }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('overview');
+  const tabReferences = useRef<Array<HTMLButtonElement | null>>([]);
   const name = state.overview.status === 'success' ? state.overview.envelope.data.name : state.code;
 
   return (
@@ -31,7 +32,11 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
           <div>
             <dt>数据截止</dt>
             <dd>
-              <time dateTime={state.cutoff}>{state.cutoff}</time>
+              {state.cutoff === null ? (
+                '不可用'
+              ) : (
+                <time dateTime={state.cutoff}>{state.cutoff}</time>
+              )}
             </dd>
           </div>
         </dl>
@@ -53,8 +58,13 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
         <DataStatus label="市场快照" resource={state.marketStatus} />
       </div>
 
-      <div className="workspace-tabs" role="tablist" aria-label="股票研究视图">
-        {WORKSPACE_TABS.map((tab) => (
+      <div
+        className="workspace-tabs"
+        role="tablist"
+        aria-label="股票研究视图"
+        aria-orientation="horizontal"
+      >
+        {WORKSPACE_TABS.map((tab, index) => (
           <button
             key={tab.id}
             type="button"
@@ -63,7 +73,13 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
             aria-controls={`panel-${tab.id}`}
             aria-selected={activeTab === tab.id}
             tabIndex={activeTab === tab.id ? 0 : -1}
+            ref={(element) => {
+              tabReferences.current[index] = element;
+            }}
             onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(event) =>
+              handleTabKeyDown(event, index, setActiveTab, tabReferences.current)
+            }
           >
             {tab.label}
           </button>
@@ -88,6 +104,34 @@ export function StockWorkspace({ state }: { readonly state: StockWorkspaceState 
       </footer>
     </article>
   );
+}
+
+function handleTabKeyDown(
+  event: KeyboardEvent<HTMLButtonElement>,
+  currentIndex: number,
+  activate: (tab: WorkspaceTabId) => void,
+  tabElements: readonly (HTMLButtonElement | null)[],
+): void {
+  let nextIndex: number | undefined;
+  if (event.key === 'ArrowRight') {
+    nextIndex = (currentIndex + 1) % WORKSPACE_TABS.length;
+  } else if (event.key === 'ArrowLeft') {
+    nextIndex = (currentIndex - 1 + WORKSPACE_TABS.length) % WORKSPACE_TABS.length;
+  } else if (event.key === 'Home') {
+    nextIndex = 0;
+  } else if (event.key === 'End') {
+    nextIndex = WORKSPACE_TABS.length - 1;
+  }
+
+  if (nextIndex === undefined) {
+    return;
+  }
+  event.preventDefault();
+  const nextTab = WORKSPACE_TABS[nextIndex];
+  if (nextTab !== undefined) {
+    activate(nextTab.id);
+    tabElements[nextIndex]?.focus();
+  }
 }
 
 function WorkspaceLimitations({ state }: { readonly state: StockWorkspaceState }) {

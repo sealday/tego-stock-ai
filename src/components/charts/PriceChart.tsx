@@ -8,7 +8,7 @@ import {
   type LineData,
   type Time,
 } from 'lightweight-charts';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { TechnicalIndicators } from '../../analysis/indicators';
 import type { DailyPrice } from '../../domain/stock';
@@ -23,7 +23,10 @@ type OverlayIndicator = 'moving-averages' | 'bollinger';
 export function PriceChart({ history, indicators }: PriceChartProps) {
   const containerReference = useRef<HTMLDivElement>(null);
   const [overlay, setOverlay] = useState<OverlayIndicator>('moving-averages');
-  const sortedHistory = [...history].sort((left, right) => left.date.localeCompare(right.date));
+  const sortedHistory = useMemo(
+    () => [...history].sort((left, right) => left.date.localeCompare(right.date)),
+    [history],
+  );
 
   useEffect(() => {
     const container = containerReference.current;
@@ -147,7 +150,7 @@ export function PriceChart({ history, indicators }: PriceChartProps) {
       </details>
       <p className="price-chart__attribution">
         <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">
-          图表由 TradingView Lightweight Charts 提供
+          Copyright (c) 2025 TradingView, Inc. https://www.tradingview.com/
         </a>
       </p>
     </div>

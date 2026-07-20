@@ -9,7 +9,7 @@ export interface TerminalShellProps {
   readonly selectedStock: StockSearchResult | null;
   readonly marketState: string;
   readonly source: string;
-  readonly cutoff: string;
+  readonly cutoff: string | null;
   readonly dataStatus: WorkspaceDataStatus;
   readonly lastSuccessfulAt?: string | undefined;
   readonly onStockSelect: (stock: StockSearchResult) => void;
@@ -79,9 +79,7 @@ export function TerminalShell({
             </div>
             <div>
               <dt>截止</dt>
-              <dd>
-                <time dateTime={cutoff}>{cutoff}</time>
-              </dd>
+              <dd>{cutoff === null ? '不可用' : <time dateTime={cutoff}>{cutoff}</time>}</dd>
             </div>
             <div>
               <dt>来源</dt>

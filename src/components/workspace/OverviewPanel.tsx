@@ -109,6 +109,9 @@ function ChangeLabel({
       </p>
     );
   }
+  if (change === 0) {
+    return <p className="market-change">平盘 0.00%</p>;
+  }
   const isUp = change >= 0;
   return (
     <p className={`market-change market-change--${isUp ? 'up' : 'down'}`}>
@@ -118,11 +121,19 @@ function ChangeLabel({
   );
 }
 
-function ScoreCard({ label, score }: { readonly label: string; readonly score: ExplainableScore }) {
+function ScoreCard({
+  label,
+  score,
+}: {
+  readonly label: string;
+  readonly score: ExplainableScore | null;
+}) {
   return (
     <article className="score-card">
       <h3>{label}</h3>
-      {score.score === null ? (
+      {score === null ? (
+        <p className="missing-value">对应数据不可用</p>
+      ) : score.score === null ? (
         <p className="missing-value">参考数据不足</p>
       ) : (
         <>
@@ -130,7 +141,7 @@ function ScoreCard({ label, score }: { readonly label: string; readonly score: E
           <span>{bandLabel(score.band)}</span>
         </>
       )}
-      {score.observations.length > 0 ? (
+      {score !== null && score.observations.length > 0 ? (
         <ul className="score-card__evidence" aria-label={`${label}计算证据`}>
           {score.observations.map((observation) => (
             <li key={observation.key}>
@@ -145,7 +156,7 @@ function ScoreCard({ label, score }: { readonly label: string; readonly score: E
           ))}
         </ul>
       ) : null}
-      {score.missingDetails.length > 0 ? (
+      {score !== null && score.missingDetails.length > 0 ? (
         <ul className="score-card__missing" aria-label={`${label}数据缺口`}>
           {score.missingDetails.map((detail) => (
             <li key={detail.key}>

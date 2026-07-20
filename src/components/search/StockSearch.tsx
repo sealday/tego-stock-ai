@@ -27,6 +27,7 @@ const SAFE_SEARCH_ERROR = '暂时无法搜索，请稍后重试。';
 export function StockSearch({ onSelect, search = searchStocks }: StockSearchProps) {
   const listboxId = useId();
   const committedQueryReference = useRef<string | null>(null);
+  const generationReference = useRef(0);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<readonly StockSearchResult[]>([]);
   const [status, setStatus] = useState<SearchStatus>('idle');
@@ -48,19 +49,21 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
       return undefined;
     }
 
+    const generation = generationReference.current;
+    setResults([]);
+    setStatus('loading');
     const controller = new AbortController();
     const timeout = window.setTimeout(() => {
-      setStatus('loading');
       void search(normalizedQuery, controller.signal)
         .then((matches) => {
-          if (controller.signal.aborted) {
+          if (controller.signal.aborted || generation !== generationReference.current) {
             return;
           }
           setResults(matches);
           setStatus('success');
         })
         .catch(() => {
-          if (controller.signal.aborted) {
+          if (controller.signal.aborted || generation !== generationReference.current) {
             return;
           }
           setResults([]);
@@ -75,6 +78,7 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
   }, [normalizedQuery, search]);
 
   function choose(stock: StockSearchResult) {
+    generationReference.current += 1;
     committedQueryReference.current = stock.name;
     setQuery(stock.name);
     setResults([]);
@@ -100,6 +104,7 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
         choose(selected);
       }
     } else if (event.key === 'Escape') {
+      generationReference.current += 1;
       setResults([]);
       setStatus('idle');
       setActiveIndex(-1);
@@ -125,22 +130,39 @@ export function StockSearch({ onSelect, search = searchStocks }: StockSearchProp
         aria-expanded={hasPopup}
         aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined}
         placeholder="代码 / 名称 / 拼音"
-        onChange={(event) => setQuery(event.currentTarget.value)}
+        onChange={(event) => {
+          const nextQuery = event.currentTarget.value;
+          generationReference.current += 1;
+          setQuery(nextQuery);
+          setResults([]);
+          setActiveIndex(-1);
+          setStatus(nextQuery.trim().length >= MINIMUM_QUERY_LENGTH ? 'loading' : 'idle');
+        }}
         onKeyDown={handleKeyDown}
       />
       {hasPopup ? (
-        <div className="stock-search__popover">
-          {status === 'loading' ? <p className="stock-search__message">正在搜索…</p> : null}
+        <div className="stock-search__popover" id={listboxId}>
+          {status === 'loading' ? (
+            <p className="stock-search__message" role="status" aria-live="polite">
+              正在搜索…
+            </p>
+          ) : null}
           {status === 'error' ? (
-            <p className="stock-search__message stock-search__message--error" role="alert">
+            <p
+              className="stock-search__message stock-search__message--error"
+              role="alert"
+              aria-live="assertive"
+            >
               {SAFE_SEARCH_ERROR}
             </p>
           ) : null}
           {status === 'success' && results.length === 0 ? (
-            <p className="stock-search__message">未找到匹配的 A 股</p>
+            <p className="stock-search__message" role="status" aria-live="polite">
+              未找到匹配的 A 股
+            </p>
           ) : null}
           {status === 'success' && results.length > 0 ? (
-            <ul className="stock-search__results" id={listboxId} role="listbox">
+            <ul className="stock-search__results" role="listbox">
               {results.map((stock, index) => (
                 <li
                   id={`${listboxId}-${index}`}

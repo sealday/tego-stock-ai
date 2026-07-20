@@ -45,6 +45,11 @@ describe('StockSearch', () => {
 
     await advance(299);
     expect(search).not.toHaveBeenCalled();
+    expect(screen.getByRole('status').textContent).toContain('正在搜索…');
+    const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+    const popupId = input.getAttribute('aria-controls');
+    expect(popupId).not.toBeNull();
+    expect(document.getElementById(popupId ?? '')).not.toBeNull();
 
     await advance(1);
     expect(search).toHaveBeenCalledOnce();
@@ -53,6 +58,60 @@ describe('StockSearch', () => {
     await act(async () => resolveSearch?.([MOUTAI]));
 
     expect(screen.getByRole('option', { name: /贵州茅台600519\.SHGZMT/ })).toBeVisible();
+  });
+
+  it('hides stale results immediately during debounce and prevents selecting them', async () => {
+    vi.useFakeTimers();
+    const onSelect = vi.fn();
+    const search = vi
+      .fn<StockSearchFunction>()
+      .mockResolvedValueOnce([MOUTAI])
+      .mockImplementationOnce(() => new Promise(() => undefined));
+    render(<StockSearch onSelect={onSelect} search={search} />);
+    const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+
+    fireEvent.change(input, { target: { value: '600519' } });
+    await advance(300);
+    expect(screen.getByRole('option', { name: /贵州茅台/ })).toBeVisible();
+
+    fireEvent.change(input, { target: { value: '平安' } });
+
+    expect(screen.queryByRole('option', { name: /贵州茅台/ })).toBeNull();
+    expect(screen.getByRole('status').textContent).toContain('正在搜索…');
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onSelect).not.toHaveBeenCalled();
+    await advance(299);
+    expect(search).toHaveBeenCalledOnce();
+    await advance(1);
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores an older response that resolves after a newer query', async () => {
+    vi.useFakeTimers();
+    let resolveFirst: ((value: readonly StockSearchResult[]) => void) | undefined;
+    const search = vi
+      .fn<StockSearchFunction>()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce([PING_AN]);
+    render(<StockSearch onSelect={vi.fn()} search={search} />);
+    const input = screen.getByRole('combobox', { name: '搜索 A 股' });
+
+    fireEvent.change(input, { target: { value: '600519' } });
+    await advance(300);
+    fireEvent.change(input, { target: { value: '平安' } });
+    await advance(300);
+    expect(screen.getByRole('option', { name: /平安银行/ })).toBeVisible();
+
+    await act(async () => resolveFirst?.([MOUTAI]));
+
+    expect(screen.queryByRole('option', { name: /贵州茅台/ })).toBeNull();
+    expect(screen.getByRole('option', { name: /平安银行/ })).toBeVisible();
   });
 
   it('selects a result with ArrowDown and Enter', async () => {
@@ -91,7 +150,7 @@ describe('StockSearch', () => {
 
     fireEvent.change(input, { target: { value: '600' } });
     await advance(300);
-    expect(screen.getByText('未找到匹配的 A 股')).toBeVisible();
+    expect(screen.getByRole('status').textContent).toContain('未找到匹配的 A 股');
 
     fireEvent.change(input, { target: { value: '茅台' } });
     await advance(300);

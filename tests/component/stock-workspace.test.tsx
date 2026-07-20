@@ -1,4 +1,5 @@
 import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { createChart } from 'lightweight-charts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { StockWorkspace } from '../../src/components/workspace/StockWorkspace';
@@ -14,6 +15,7 @@ import {
   createWorkspaceAnalysis,
   deriveMarketState,
   formatShanghaiTimestamp,
+  toShanghaiIsoDate,
   useStockWorkspace,
   type StockWorkspaceState,
   type WorkspaceFetchClient,
@@ -133,7 +135,11 @@ function readyState(overrides: Partial<StockWorkspaceState> = {}): StockWorkspac
         { freshness: 'stale' },
       ),
     },
-    analysis: createWorkspaceAnalysis(history, overview, fundamentals, AS_OF),
+    analysis: createWorkspaceAnalysis({
+      history: envelope(history),
+      overview: envelope(overview),
+      fundamentals: envelope(fundamentals),
+    }),
     ...overrides,
   };
 }
@@ -196,7 +202,49 @@ function freshState(): StockWorkspaceState {
         { limitations: ['仅包含日线收盘数据'] },
       ),
     },
-    analysis: createWorkspaceAnalysis(history, overview, fundamentals, AS_OF),
+    analysis: createWorkspaceAnalysis({
+      history: envelope(history),
+      overview: envelope(overview),
+      fundamentals: envelope(fundamentals),
+    }),
+  };
+}
+
+type WorkspaceEndpoint = 'overview' | 'history' | 'fundamentals' | 'marketStatus';
+
+function validWorkspaceBodies(): Record<WorkspaceEndpoint, MarketEnvelope<unknown>> {
+  const state = readyState();
+  if (
+    state.overview.status !== 'success' ||
+    state.history.status !== 'success' ||
+    state.fundamentals.status !== 'success' ||
+    state.marketStatus.status !== 'success'
+  ) {
+    throw new Error('Expected successful workspace fixtures');
+  }
+  return {
+    overview: state.overview.envelope,
+    history: state.history.envelope,
+    fundamentals: state.fundamentals.envelope,
+    marketStatus: state.marketStatus.envelope,
+  };
+}
+
+function workspaceFetchClient(
+  bodies: Record<WorkspaceEndpoint, MarketEnvelope<unknown>>,
+): WorkspaceFetchClient {
+  return async (input) => {
+    const url = String(input);
+    if (url.includes('/overview')) {
+      return Response.json(bodies.overview);
+    }
+    if (url.includes('/history')) {
+      return Response.json(bodies.history);
+    }
+    if (url.includes('/fundamentals')) {
+      return Response.json(bodies.fundamentals);
+    }
+    return Response.json(bodies.marketStatus);
   };
 }
 
@@ -209,7 +257,7 @@ describe('StockWorkspace', () => {
     expect(screen.getByText('财务质量')).toBeVisible();
     expect(screen.getByText('估值位置')).toBeVisible();
     expect(screen.getByRole('heading', { name: '主要价格图' })).toBeVisible();
-    expect(screen.getByText('图表由 TradingView Lightweight Charts 提供')).toBeVisible();
+    expect(screen.getByText(/Copyright \(c\) 2025 TradingView/)).toBeVisible();
     expect(screen.getByText('Moving-average alignment')).toBeVisible();
     expect(screen.getAllByText(/加权贡献/).length).toBeGreaterThan(0);
     expect(screen.getByText('Price to earnings percentile')).toBeVisible();
@@ -244,8 +292,9 @@ describe('StockWorkspace', () => {
 
   it('preserves weighted contribution values that are already expressed as 0–100 points', () => {
     const state = readyState();
-    const observation = state.analysis.trend.observations[0];
-    if (observation === undefined) {
+    const trend = state.analysis.trend;
+    const observation = trend?.observations[0];
+    if (trend === null || observation === undefined) {
       throw new Error('Expected a trend observation fixture');
     }
 
@@ -256,7 +305,7 @@ describe('StockWorkspace', () => {
           analysis: {
             ...state.analysis,
             trend: {
-              ...state.analysis.trend,
+              ...trend,
               observations: [{ ...observation, weightedContribution: 40 }],
             },
           },
@@ -266,6 +315,78 @@ describe('StockWorkspace', () => {
 
     expect(screen.getByText(/加权贡献：40\.0 分/)).toBeVisible();
     expect(screen.queryByText(/加权贡献：4000\.0 分/)).toBeNull();
+  });
+
+  it('labels a zero daily change as flat instead of positive', () => {
+    const state = readyState();
+    if (state.overview.status !== 'success') {
+      throw new Error('Expected an overview fixture');
+    }
+    render(
+      <StockWorkspace
+        state={{
+          ...state,
+          overview: {
+            status: 'success',
+            envelope: {
+              ...state.overview.envelope,
+              data: { ...state.overview.envelope.data, changePercent: 0 },
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('平盘 0.00%')).toBeVisible();
+    expect(screen.queryByText('上涨 +0.00%')).toBeNull();
+  });
+
+  it('supports looping horizontal-tab keyboard navigation with roving focus', () => {
+    render(<StockWorkspace state={readyState()} />);
+    const overview = screen.getByRole('tab', { name: '概览' });
+    overview.focus();
+
+    fireEvent.keyDown(overview, { key: 'ArrowLeft' });
+    const aiReport = screen.getByRole('tab', { name: 'AI 报告' });
+    expect(document.activeElement).toBe(aiReport);
+    expect(aiReport.getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.keyDown(aiReport, { key: 'Home' });
+    expect(document.activeElement).toBe(overview);
+    expect(overview.getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.keyDown(overview, { key: 'End' });
+    expect(document.activeElement).toBe(aiReport);
+    fireEvent.keyDown(aiReport, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(overview);
+  });
+
+  it('does not recreate the chart when identical props rerender', () => {
+    const state = readyState();
+    const createChartMock = vi.mocked(createChart);
+    createChartMock.mockClear();
+    const { rerender } = render(<StockWorkspace state={state} />);
+    expect(createChartMock).toHaveBeenCalledTimes(1);
+
+    rerender(<StockWorkspace state={state} />);
+
+    expect(createChartMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the complete Lightweight Charts v5.2.0 attribution notice', () => {
+    render(<StockWorkspace state={readyState()} />);
+
+    const attribution = screen.getByRole('link', {
+      name: 'Copyright (c) 2025 TradingView, Inc. https://www.tradingview.com/',
+    });
+    expect(attribution.getAttribute('href')).toBe('https://www.tradingview.com/');
+  });
+
+  it('shows an unavailable cutoff when no successful market-data envelope exists', () => {
+    render(<StockWorkspace state={readyState({ cutoff: null })} />);
+
+    expect(screen.getByText('不可用', { selector: '.workspace-provenance dd' })).toBeVisible();
+    expect(screen.queryByText('null')).toBeNull();
   });
 
   it('discloses missing, stale, and endpoint-error states while preserving usable panels', () => {
@@ -294,7 +415,7 @@ describe('StockWorkspace', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '技术分析' }));
     expect(screen.getByRole('heading', { name: '价格与成交量' })).toBeVisible();
-    expect(screen.getByText('图表由 TradingView Lightweight Charts 提供')).toBeVisible();
+    expect(screen.getByText(/Copyright \(c\) 2025 TradingView/)).toBeVisible();
   });
 
   it('shows explicit current-period limitations instead of fabricating a trend series', () => {
@@ -325,14 +446,15 @@ describe('StockWorkspace', () => {
       <StockWorkspace
         state={readyState({
           history: { status: 'success', envelope: envelope([]) },
-          analysis: createWorkspaceAnalysis(
-            [],
-            sourceState.overview.status === 'success' ? sourceState.overview.envelope.data : null,
-            sourceState.fundamentals.status === 'success'
-              ? sourceState.fundamentals.envelope.data
-              : null,
-            AS_OF,
-          ),
+          analysis: createWorkspaceAnalysis({
+            history: envelope([]),
+            overview:
+              sourceState.overview.status === 'success' ? sourceState.overview.envelope : null,
+            fundamentals:
+              sourceState.fundamentals.status === 'success'
+                ? sourceState.fundamentals.envelope
+                : null,
+          }),
         })}
       />,
     );
@@ -415,6 +537,11 @@ describe('workspace status derivation', () => {
 
   it('formats audit timestamps in explicit Asia/Shanghai time', () => {
     expect(formatShanghaiTimestamp('2026-07-17T08:31:00.000Z')).toBe('2026-07-17 16:31:00');
+  });
+
+  it('derives request dates from Asia/Shanghai across the UTC date boundary', () => {
+    expect(toShanghaiIsoDate(new Date('2026-07-17T15:59:59.000Z'))).toBe('2026-07-17');
+    expect(toShanghaiIsoDate(new Date('2026-07-17T16:00:00.000Z'))).toBe('2026-07-18');
   });
 });
 
@@ -506,5 +633,177 @@ describe('useStockWorkspace', () => {
       status: 'error',
       message: '该数据项暂时不可用，请稍后重试。',
     });
+  });
+
+  it.each([
+    ['zero OHLC', (rows: readonly DailyPrice[]) => [{ ...rows[0], close: 0 }, ...rows.slice(1)]],
+    [
+      'negative volume',
+      (rows: readonly DailyPrice[]) => [{ ...rows[0], volumeShares: -1 }, ...rows.slice(1)],
+    ],
+    [
+      'negative turnover',
+      (rows: readonly DailyPrice[]) => [{ ...rows[0], turnoverCny: -1 }, ...rows.slice(1)],
+    ],
+    [
+      'invalid OHLC bounds',
+      (rows: readonly DailyPrice[]) => [
+        { ...rows[0], high: (rows[0]?.open ?? 1) - 1 },
+        ...rows.slice(1),
+      ],
+    ],
+    [
+      'zero adjustment factor',
+      (rows: readonly DailyPrice[]) => [{ ...rows[0], adjustmentFactor: 0 }, ...rows.slice(1)],
+    ],
+    ['duplicate date', (rows: readonly DailyPrice[]) => [...rows, { ...rows[0] }]],
+    [
+      'out-of-range date',
+      (rows: readonly DailyPrice[]) => [
+        { ...rows[0], date: isoDate('2025-07-16') },
+        ...rows.slice(1),
+      ],
+    ],
+    [
+      'wrong stock code',
+      (rows: readonly DailyPrice[]) => [
+        { ...rows[0], code: stockCode('000001.SZ') },
+        ...rows.slice(1),
+      ],
+    ],
+  ] as const)('rejects %s history without crashing analysis', async (_label, mutate) => {
+    const bodies = validWorkspaceBodies();
+    const rows = bodies.history.data as readonly DailyPrice[];
+    bodies.history = { ...bodies.history, data: mutate(rows) };
+    const fetchClient = workspaceFetchClient(bodies);
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+    );
+
+    await waitFor(() => expect(result.current.history.status).toBe('error'));
+    expect(result.current.overview.status).toBe('success');
+    expect(result.current.fundamentals.status).toBe('success');
+    expect(result.current.analysis.trend).toBeNull();
+  });
+
+  it.each(['overview', 'fundamentals'] as const)(
+    'rejects a wrong stock code from %s',
+    async (endpoint) => {
+      const bodies = validWorkspaceBodies();
+      bodies[endpoint] = {
+        ...bodies[endpoint],
+        data: {
+          ...(bodies[endpoint].data as Record<string, unknown>),
+          code: '000001.SZ',
+        },
+      };
+      const fetchClient = workspaceFetchClient(bodies);
+
+      const { result } = renderHook(() =>
+        useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+      );
+
+      await waitFor(() => expect(result.current[endpoint].status).toBe('error'));
+    },
+  );
+
+  it('binds visible resources to the current request key during a synchronous stock switch', async () => {
+    const bodies = validWorkspaceBodies();
+    let pending = false;
+    const fetchClient: WorkspaceFetchClient = async (input) => {
+      if (pending) {
+        return new Promise<Response>(() => undefined);
+      }
+      return workspaceFetchClient(bodies)(input);
+    };
+    let synchronousSwitch: StockWorkspaceState | undefined;
+    const nextCode = stockCode('000001.SZ');
+    const { result, rerender } = renderHook(
+      ({ code }) => {
+        const state = useStockWorkspace({ code, asOf: AS_OF, fetchClient });
+        if (code === nextCode && synchronousSwitch === undefined) {
+          synchronousSwitch = state;
+        }
+        return state;
+      },
+      { initialProps: { code: CODE } },
+    );
+    await waitFor(() => expect(result.current.overview.status).toBe('success'));
+
+    pending = true;
+    rerender({ code: nextCode });
+
+    expect(synchronousSwitch?.overview.status).toBe('loading');
+    expect(synchronousSwitch?.history.status).toBe('loading');
+    expect(synchronousSwitch?.fundamentals.status).toBe('loading');
+    expect(synchronousSwitch?.marketStatus.status).toBe('loading');
+  });
+
+  it('uses resource envelope dates for analysis and the earliest data cutoff on lagged weekends', async () => {
+    const bodies = validWorkspaceBodies();
+    bodies.overview = { ...bodies.overview, asOf: isoDate('2026-07-17') };
+    bodies.history = { ...bodies.history, asOf: isoDate('2026-07-16') };
+    bodies.fundamentals = { ...bodies.fundamentals, asOf: isoDate('2026-07-15') };
+    bodies.marketStatus = { ...bodies.marketStatus, asOf: isoDate('2026-07-18') };
+    const fetchClient = workspaceFetchClient(bodies);
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({
+        code: CODE,
+        asOf: isoDate('2026-07-18'),
+        fetchClient,
+      }),
+    );
+    await waitFor(() => expect(result.current.dataStatus).toBe('stale'));
+
+    expect(result.current.cutoff).toBe('2026-07-15');
+    expect(result.current.analysis.trend?.cutoff).toBe('2026-07-16');
+    expect(result.current.analysis.quality?.cutoff).toBe('2026-07-15');
+    expect(result.current.analysis.valuation?.cutoff).toBe('2026-07-17');
+  });
+
+  it('does not invent a valuation cutoff when overview fails', async () => {
+    const bodies = validWorkspaceBodies();
+    bodies.history = { ...bodies.history, asOf: isoDate('2026-07-16') };
+    bodies.fundamentals = { ...bodies.fundamentals, asOf: isoDate('2026-07-15') };
+    const fetchClient: WorkspaceFetchClient = async (input) =>
+      String(input).includes('/overview')
+        ? new Response(null, { status: 503 })
+        : workspaceFetchClient(bodies)(input);
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({
+        code: CODE,
+        asOf: isoDate('2026-07-18'),
+        fetchClient,
+      }),
+    );
+    await waitFor(() => expect(result.current.overview.status).toBe('error'));
+
+    expect(result.current.cutoff).toBe('2026-07-15');
+    expect(result.current.analysis.valuation).toBeNull();
+    expect(result.current.analysis.trend?.cutoff).toBe('2026-07-16');
+    expect(result.current.analysis.quality?.cutoff).toBe('2026-07-15');
+  });
+
+  it('reports an unavailable cutoff and analysis when every market-data resource fails', async () => {
+    const bodies = validWorkspaceBodies();
+    const fetchClient: WorkspaceFetchClient = async (input) =>
+      String(input).includes('/market/status')
+        ? Response.json(bodies.marketStatus)
+        : new Response(null, { status: 503 });
+
+    const { result } = renderHook(() =>
+      useStockWorkspace({ code: CODE, asOf: AS_OF, fetchClient }),
+    );
+    await waitFor(() => expect(result.current.overview.status).toBe('error'));
+    await waitFor(() => expect(result.current.history.status).toBe('error'));
+    await waitFor(() => expect(result.current.fundamentals.status).toBe('error'));
+
+    expect(result.current.cutoff).toBeNull();
+    expect(result.current.analysis.trend).toBeNull();
+    expect(result.current.analysis.quality).toBeNull();
+    expect(result.current.analysis.valuation).toBeNull();
   });
 });
