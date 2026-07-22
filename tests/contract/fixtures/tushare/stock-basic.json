@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "ts_code": "000001.SZ",
+      "name": "平安银行",
+      "cnspell": "PAYH",
+      "list_status": "L"
+    },
+    {
+      "ts_code": "600519.SH",
+      "name": "贵州茅台",
+      "cnspell": "GZMT",
+      "list_status": "L"
+    },
+    {
+      "ts_code": "600001.SH",
+      "name": "已退市样本",
+      "cnspell": "YTSYB",
+      "list_status": "D"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "name": "tego-stock-ai",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit --project component --project contract",
+    "test:browser": "playwright test",
+    "test:visual": "playwright test --config=playwright.visual.config.ts",
+    "smoke:deployment": "node scripts/deployment-smoke.mjs",
+    "ci:portable": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run test:browser",
+    "ci": "npm run ci:portable && npm run test:visual",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@vercel/blob": "2.6.1",
+    "lightweight-charts": "5.2.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "20.5.3",
+    "@commitlint/config-conventional": "20.5.3",
+    "@playwright/test": "1.61.1",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vercel/node": "5.8.26",
+    "@vitejs/plugin-react": "6.0.3",
+    "@vitest/coverage-v8": "4.1.10",
+    "fake-indexeddb": "6.2.5",
+    "husky": "9.1.7",
+    "jsdom": "29.1.1",
+    "oxfmt": "0.59.0",
+    "oxlint": "1.74.0",
+    "typescript": "6.0.3",
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "packageManager": "npm@11.13.0"
+}

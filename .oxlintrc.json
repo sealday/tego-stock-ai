@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "import"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "react/jsx-key": "error",
+    "react/no-danger": "error",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "error",
+    "import/no-cycle": "error",
+    "import/no-duplicates": "error"
+  },
+  "ignorePatterns": ["dist/**", "coverage/**", "playwright-report/**", "test-results/**"]
+}
